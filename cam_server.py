@@ -229,22 +229,30 @@ class CamaraIMX500:
         return frame
     
     def simular_detecciones(self, frame):
-        """Detecta personas usando HOG detector optimizado para Raspberry Pi"""
+        """Detecta personas usando HOG detector optimizado para Raspberry Pi con FPS estable"""
         try:
             # Usar HOG detector como detector principal
             hog = cv2.HOGDescriptor()
             hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
             
-            # Mantener resolución optimizada para Raspberry Pi
+            # Reducir resolución para mejor rendimiento si es necesario
             frame_procesar = frame
             scale_factor = 1.0
             
-            # Detectar personas con parámetros optimizados para rendimiento
+            # Aplicar redimensionamiento para mejor rendimiento
+            if frame.shape[0] > 480 or frame.shape[1] > 640:
+                scale_factor = 0.4  # Reducir más para mejor rendimiento
+                frame_procesar = cv2.resize(frame, None, fx=scale_factor, fy=scale_factor)
+            elif frame.shape[0] > 400 or frame.shape[1] > 500:
+                scale_factor = 0.6  # Reducción moderada
+                frame_procesar = cv2.resize(frame, None, fx=scale_factor, fy=scale_factor)
+            
+            # Detectar personas con parámetros optimizados para rendimiento estable
             boxes, weights = hog.detectMultiScale(
                 frame_procesar, 
-                winStride=(8, 8),      # Eficiente para Raspberry Pi
-                padding=(4, 4),        # Padding estándar
-                scale=1.05,            # Escala eficiente
+                winStride=(32, 32),    # Aumentado para mejor rendimiento
+                padding=(16, 16),      # Padding aumentado
+                scale=1.2,             # Escala más eficiente
                 hitThreshold=0         # Sin umbral de hit
             )
             
@@ -253,8 +261,8 @@ class CamaraIMX500:
                 print(f"🔍 HOG detectó {len(boxes)} candidatos")
             
             for (x, y, w, h), weight in zip(boxes, weights):
-                # Filtrar por confianza mínima
-                if weight > self.config['confianza_minima']:
+                # Filtrar por confianza mínima más estricta
+                if weight > self.config['confianza_minima'] * 1.2:  # 20% más estricto
                     # Filtrar por área mínima
                     area = w * h
                     if area > self.config['area_minima']:
@@ -266,7 +274,7 @@ class CamaraIMX500:
                             w = int(w * scale_inv)
                             h = int(h * scale_inv)
                         
-                        # Aplicar ROI de puerta
+                        # Aplicar ROI de puerta más estricto
                         centro_x = x + w // 2
                         centro_y = y + h // 2
                         
@@ -292,9 +300,13 @@ class CamaraIMX500:
                 detecciones = self.aplicar_nms(detecciones)
                 print(f"🎯 Después de NMS: {len(detecciones)} detecciones únicas")
             
-            # Actualizar métricas de inferencia
+            # Actualizar métricas de inferencia de manera más estable
             timestamp = time.time()
             self.timestamps_inferencia.append(timestamp)
+            
+            # Mantener solo los últimos 15 timestamps para cálculo más estable
+            if len(self.timestamps_inferencia) > 15:
+                self.timestamps_inferencia = deque(list(self.timestamps_inferencia)[-15:])
             
             if len(self.timestamps_inferencia) >= 2:
                 # Calcular FPS de inferencia de manera más robusta
@@ -537,21 +549,30 @@ class TrackerPersonas:
         return len(tracks_a_eliminar)
     
     def verificar_cruce_linea(self):
-        """Verifica cruces de línea de manera simple y eficiente"""
+        """Verifica cruces de línea con lógica mejorada para conteo preciso"""
         eventos_detectados = 0
         linea_x = self.config['linea_cruce']
         ancho_banda = self.config['ancho_banda_cruce']
         
         for track_id, track in self.tracks.items():
-            if not track.activo or len(track.detecciones) < 2:
+            if not track.activo or len(track.detecciones) < 3:  # Mínimo 3 detecciones para estabilidad
                 continue
             
-            # Obtener solo las últimas 2 posiciones para determinar dirección
-            ultimas_detecciones = list(track.detecciones)[-2:]
+            # Obtener las últimas 3 posiciones para mejor estabilidad
+            ultimas_detecciones = list(track.detecciones)[-3:]
+            
+            # Verificar estabilidad del track
+            posiciones_x = [d.centro[0] for d in ultimas_detecciones]
+            varianza_x = np.var(posiciones_x)
+            
+            # Filtrar tracks muy inestables
+            if varianza_x > 1000:  # Umbral de estabilidad
+                continue
             
             # Verificar si la persona está cruzando la línea
             posicion_actual = ultimas_detecciones[-1].centro
             posicion_anterior = ultimas_detecciones[-2].centro
+            posicion_inicial = ultimas_detecciones[0].centro
             
             # Calcular si está dentro de la banda de cruce
             en_banda_actual = abs(posicion_actual[0] - linea_x) <= ancho_banda
@@ -559,20 +580,31 @@ class TrackerPersonas:
             
             # Solo procesar si está en la banda de cruce
             if en_banda_actual or en_banda_anterior:
-                # Calcular movimiento horizontal
-                movimiento_x = posicion_actual[0] - posicion_anterior[0]
+                # Calcular movimiento horizontal total (inicial a final)
+                movimiento_total_x = posicion_actual[0] - posicion_inicial[0]
+                movimiento_reciente_x = posicion_actual[0] - posicion_anterior[0]
                 
-                # Verificar si hay movimiento horizontal significativo
-                if abs(movimiento_x) > self.config['umbral_movimiento']:
-                    # Determinar dirección
-                    if movimiento_x > 0:
+                # Verificar si hay movimiento horizontal significativo y consistente
+                if (abs(movimiento_total_x) > self.config['umbral_movimiento'] and 
+                    abs(movimiento_reciente_x) > self.config['umbral_movimiento'] / 2):
+                    
+                    # Determinar dirección basada en movimiento total
+                    if movimiento_total_x > 0:
                         direccion = 'derecha'  # Entrada
                         evento = 'entrada'
                     else:
                         direccion = 'izquierda'  # Salida
                         evento = 'salida'
                     
-                    print(f"🎯 Track {track_id} cruzando línea: {direccion} (movimiento_x={movimiento_x:.1f})")
+                    # Verificar que el track no haya cambiado de dirección recientemente
+                    if hasattr(track, 'ultima_direccion') and track.ultima_direccion != direccion:
+                        # Cambio de dirección, verificar que sea consistente
+                        if abs(movimiento_total_x) < self.config['umbral_movimiento'] * 2:
+                            continue  # Movimiento muy corto, ignorar
+                    
+                    track.ultima_direccion = direccion
+                    
+                    print(f"🎯 Track {track_id} cruzando línea: {direccion} (mov_total={movimiento_total_x:.1f}, mov_reciente={movimiento_reciente_x:.1f})")
                     
                     # Registrar evento si no se ha registrado recientemente
                     if self.registrar_evento(track_id, evento, posicion_actual):
@@ -584,7 +616,7 @@ class TrackerPersonas:
         return eventos_detectados
     
     def registrar_evento(self, track_id, tipo_evento, posicion):
-        """Registra un evento de entrada o salida con anti-rebote mejorado"""
+        """Registra un evento de entrada o salida con anti-rebote mejorado y validación de estado"""
         timestamp_actual = time.time()
         
         # Verificar si este track ya registró un evento recientemente
@@ -592,23 +624,33 @@ class TrackerPersonas:
             ultimo_evento = self.eventos_recientes[track_id]
             tiempo_transcurrido = timestamp_actual - ultimo_evento['timestamp']
             
-            # Si es el mismo tipo de evento, aplicar debounce más estricto
+            # Si es el mismo tipo de evento, aplicar debounce estricto
             if ultimo_evento['tipo'] == tipo_evento:
                 if tiempo_transcurrido < (self.config['debounce_ms'] / 1000.0):
                     print(f"🔄 Debounce activo para track {track_id}: {tipo_evento} (tiempo: {tiempo_transcurrido:.1f}s)")
                     return False
             else:
-                # Si es diferente tipo de evento, permitir más rápido
-                if tiempo_transcurrido < (self.config['debounce_ms'] / 2000.0):
+                # Si es diferente tipo de evento, verificar coherencia
+                if tiempo_transcurrido < (self.config['debounce_ms'] / 1000.0):
                     print(f"🔄 Debounce activo para track {track_id}: cambio de {ultimo_evento['tipo']} a {tipo_evento}")
                     return False
+        
+        # Verificar coherencia del estado
+        track = self.tracks.get(track_id)
+        if track:
+            if tipo_evento == 'entrada' and track.estado == 'en_habitacion':
+                print(f"⚠️ Track {track_id} ya está en habitación, ignorando entrada")
+                return False
+            elif tipo_evento == 'salida' and track.estado == 'fuera':
+                print(f"⚠️ Track {track_id} ya está fuera, ignorando salida")
+                return False
         
         # Verificar si hay demasiados eventos del mismo tipo recientemente
         eventos_mismo_tipo = [e for e in self.eventos_recientes.values() 
                              if e['tipo'] == tipo_evento and 
-                             timestamp_actual - e['timestamp'] < 2.0]  # Últimos 2 segundos
+                             timestamp_actual - e['timestamp'] < 3.0]  # Últimos 3 segundos
         
-        if len(eventos_mismo_tipo) >= 3:
+        if len(eventos_mismo_tipo) >= 2:  # Reducido de 3 a 2
             print(f"⚠️ Demasiados eventos {tipo_evento} recientemente ({len(eventos_mismo_tipo)}), aplicando filtro")
             return False
         
@@ -619,13 +661,19 @@ class TrackerPersonas:
             'posicion': posicion
         }
         
-        # Actualizar contadores
+        # Actualizar contadores y estado del track
         if tipo_evento == 'entrada':
             self.contador_entradas += 1
-            print(f"🚪 ENTRADA registrada para track {track_id} - Total: {self.contador_entradas}")
+            if track:
+                track.estado = 'en_habitacion'
+            self.personas_en_habitacion += 1
+            print(f"🚪 ENTRADA registrada para track {track_id} - Total: {self.contador_entradas}, En habitación: {self.personas_en_habitacion}")
         elif tipo_evento == 'salida':
             self.contador_salidas += 1
-            print(f"🚪 SALIDA registrada para track {track_id} - Total: {self.contador_salidas}")
+            if track:
+                track.estado = 'fuera'
+            self.personas_en_habitacion = max(0, self.personas_en_habitacion - 1)
+            print(f"🚪 SALIDA registrada para track {track_id} - Total: {self.contador_salidas}, En habitación: {self.personas_en_habitacion}")
         
         # Limpiar eventos antiguos
         self.limpiar_eventos_antiguos()
@@ -747,9 +795,10 @@ class ServidorStreaming:
                 if frame is not None:
                     frame_counter += 1
                     
-                    # Procesar detecciones cada N frames para optimizar rendimiento
-                    procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 3) == 0
+                    # Procesar detecciones cada N frames para optimizar rendimiento y estabilidad
+                    procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
                     
+                    # Sistema de cache inteligente: procesar más frames si no hay detecciones
                     if procesar_detecciones:
                         # Procesar detecciones
                         detecciones = self.camara.simular_detecciones(frame)
@@ -760,12 +809,19 @@ class ServidorStreaming:
                         personas_cache = personas_actuales
                         
                         # Log reducido para optimizar rendimiento
-                        if frame_counter % 30 == 0:  # Log cada 30 frames
+                        if frame_counter % 60 == 0:  # Log cada 60 frames para reducir ruido
                             print(f"🔄 Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} tracks")
                     else:
                         # Usar cache de detecciones y tracking
                         detecciones = detecciones_cache
                         personas_actuales = personas_cache
+                        
+                        # Si no hay detecciones en cache, procesar ocasionalmente para mantener precisión
+                        if len(detecciones_cache) == 0 and frame_counter % 5 == 0:
+                            detecciones = self.camara.simular_detecciones(frame)
+                            detecciones_cache = detecciones
+                            personas_actuales = self.tracker.actualizar_tracking(detecciones)
+                            personas_cache = personas_actuales
                     
                     # Dibujar anotaciones simplificadas
                     frame_anotado = self.dibujar_anotaciones(frame, detecciones, personas_actuales)
@@ -1089,31 +1145,31 @@ class ServidorStreaming:
 
 def main():
     """Función principal"""
-    # Configuración por defecto optimizada
+    # Configuración por defecto optimizada para conteo preciso y FPS estable
     config = {
         'resolucion': [640, 480],
-        'fps_objetivo': 30,
-        'confianza_minima': 0.4,
-        'area_minima': 2000,
+        'fps_objetivo': 20,  # Reducido para estabilidad y mejor rendimiento
+        'confianza_minima': 0.5,  # Aumentado para mejor precisión
+        'area_minima': 2500,  # Aumentado para filtrar ruido
         'roi_puerta': [80, 80, 560, 400],
         'linea_cruce': 320,
-        'ancho_banda_cruce': 3,
-        'debounce_ms': 300,
-        'track_lost_ms': 700,
+        'ancho_banda_cruce': 5,  # Aumentado para mejor detección
+        'debounce_ms': 400,  # Aumentado para evitar dobles conteos
+        'track_lost_ms': 1000,  # Aumentado para mejor persistencia
         'exposure_us': 4000,
         'gain': 1.0,
-        'distancia_maxima_tracking': 80,
-        'historial_maxlen': 20,
-        'umbral_movimiento': 15,
-        'nms_iou': 0.45,
-        'procesar_cada_n_frames': 1,
+        'distancia_maxima_tracking': 60,  # Reducido para mejor precisión
+        'historial_maxlen': 15,  # Reducido para mejor rendimiento
+        'umbral_movimiento': 20,  # Aumentado para movimientos más claros
+        'nms_iou': 0.4,  # Reducido para mejor separación
+        'procesar_cada_n_frames': 3,  # Procesar cada 3 frames para mejor rendimiento
         'filtro_estabilidad': True,
-        'tiempo_persistencia_ms': 2000,
-        'umbral_confianza_alto': 0.6,
-        'umbral_confianza_medio': 0.4,
+        'tiempo_persistencia_ms': 3000,  # Aumentado para mejor tracking
+        'umbral_confianza_alto': 0.7,  # Aumentado para mejor precisión
+        'umbral_confianza_medio': 0.5,  # Aumentado para mejor precisión
         'mostrar_puntos_personas': False,
         'mostrar_linea_cruce': True,
-        'calidad_jpeg': 75,
+        'calidad_jpeg': 80,  # Aumentado para mejor calidad
         'log_reducido': True
     }
     
