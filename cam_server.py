@@ -70,15 +70,12 @@ class CamaraIMX500:
                 print("❌ rpicam-vid no disponible")
                 return False
             
-            # Comando optimizado para streaming
+            # Comando optimizado para streaming con parámetros válidos
             comando_config = [
                 '/usr/bin/rpicam-vid',
                 '--width', str(self.config['resolucion'][0]),
                 '--height', str(self.config['resolucion'][1]),
                 '--framerate', str(self.config['fps_objetivo']),
-                '--exposure', 'manual',
-                '--shutter', str(self.config['exposure_us']),
-                '--gain', str(self.config['gain']),
                 '--nopreview',
                 '--output', '-',  # Salida a stdout
                 '--codec', 'mjpeg',  # Código más rápido
@@ -86,7 +83,12 @@ class CamaraIMX500:
                 '--flush',  # Flush inmediato
                 '--awb', 'auto',  # Balance de blancos automático
                 '--metering', 'centre',  # Medición central
-                '--denoise', 'cdn_off'  # Desactivar denoise
+                '--denoise', 'cdn_off',  # Desactivar denoise
+                '--roi', '0.0,0.0,1.0,1.0',  # ROI completo
+                '--brightness', '0.0',  # Brillo neutro
+                '--contrast', '1.0',  # Contraste neutro
+                '--saturation', '1.0',  # Saturación neutra
+                '--sharpness', '0.0'  # Sin sharpening
             ]
             
             print(f"🔧 Comando cámara: {' '.join(comando_config)}")
@@ -99,15 +101,27 @@ class CamaraIMX500:
                 bufsize=0
             )
             
-            print("✅ Cámara configurada e iniciada")
-            return True
+            # Esperar un momento para que la cámara se inicialice
+            time.sleep(2)
+            
+            # Verificar que el proceso esté activo
+            if self.proceso_camara.poll() is None:
+                print("✅ Cámara configurada e iniciada")
+                return True
+            else:
+                print("❌ Proceso de cámara falló al iniciar")
+                # Obtener el error si está disponible
+                stderr_output = self.proceso_camara.stderr.read().decode()
+                if stderr_output:
+                    print(f"Error de cámara: {stderr_output}")
+                return False
             
         except Exception as e:
             print(f"❌ Error configurando cámara: {e}")
             return False
     
     def leer_frame(self):
-        """Lee un frame de la cámara usando un enfoque más robusto"""
+        """Lee un frame de la cámara usando un enfoque más robusto para MJPEG"""
         if not self.proceso_camara:
             return None
         
@@ -124,50 +138,67 @@ class CamaraIMX500:
             
             while time.time() < timeout:
                 # Leer en chunks más pequeños para mejor control
-                chunk = self.proceso_camara.stdout.read(512)
+                chunk = self.proceso_camara.stdout.read(1024)
                 if not chunk:
                     break
                 
                 buffer_mjpeg += chunk
                 
                 # Buscar marcadores de frame MJPEG
-                if b'\xff\xd8' in buffer_mjpeg and b'\xff\xd9' in buffer_mjpeg:
-                    start = buffer_mjpeg.find(b'\xff\xd8')
-                    end = buffer_mjpeg.find(b'\xff\xd9') + 2
+                start_marker = b'\xff\xd8'  # SOI (Start of Image)
+                end_marker = b'\xff\xd9'    # EOI (End of Image)
+                
+                # Buscar inicio de frame
+                start_pos = buffer_mjpeg.find(start_marker)
+                if start_pos == -1:
+                    continue
+                
+                # Buscar fin de frame después del inicio
+                end_pos = buffer_mjpeg.find(end_marker, start_pos)
+                if end_pos == -1:
+                    continue
+                
+                # Extraer frame JPEG completo
+                frame_jpeg = buffer_mjpeg[start_pos:end_pos + 2]
+                
+                # Verificar tamaño mínimo del frame
+                if len(frame_jpeg) < 5000:  # Frame muy pequeño, probablemente corrupto
+                    buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                    continue
+                
+                # Decodificar a numpy array
+                nparr = np.frombuffer(frame_jpeg, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if frame is not None and frame.shape[0] > 0 and frame.shape[1] > 0:
+                    # Actualizar métricas
+                    timestamp = time.time()
+                    self.timestamps_captura.append(timestamp)
                     
-                    if start < end:
-                        # Extraer frame JPEG
-                        frame_jpeg = buffer_mjpeg[start:end]
-                        
-                        # Verificar tamaño mínimo del frame
-                        if len(frame_jpeg) < 1000:  # Frame muy pequeño, probablemente corrupto
-                            buffer_mjpeg = buffer_mjpeg[end:]
-                            continue
-                        
-                        # Decodificar a numpy array
-                        nparr = np.frombuffer(frame_jpeg, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        
-                        if frame is not None and frame.shape[0] > 0 and frame.shape[1] > 0:
-                            # Actualizar métricas
-                            timestamp = time.time()
-                            self.timestamps_captura.append(timestamp)
-                            
-                            # Calcular FPS
-                            if len(self.timestamps_captura) >= 2:
-                                self.fps_captura = len(self.timestamps_captura) / (self.timestamps_captura[-1] - self.timestamps_captura[0])
-                            
-                            self.frame_actual = frame
-                            self.timestamp_ultimo_frame = timestamp
-                            return frame
-                        
-                        buffer_mjpeg = buffer_mjpeg[end:]
+                    # Calcular FPS de manera más robusta
+                    if len(self.timestamps_captura) >= 2:
+                        # Usar solo los últimos 10 timestamps para FPS más estable
+                        recent_timestamps = list(self.timestamps_captura)[-10:]
+                        if len(recent_timestamps) >= 2:
+                            time_span = recent_timestamps[-1] - recent_timestamps[0]
+                            if time_span > 0:
+                                self.fps_captura = (len(recent_timestamps) - 1) / time_span
+                    
+                    self.frame_actual = frame
+                    self.timestamp_ultimo_frame = timestamp
+                    
+                    # Limpiar buffer para el siguiente frame
+                    buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                    return frame
+                
+                # Limpiar buffer hasta el fin del frame actual
+                buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
             
             # Si no se pudo leer un frame válido, generar uno de placeholder
-            if not self.frame_actual is not None:
+            if self.frame_actual is None:
                 return self.generar_frame_placeholder()
             
-            return None
+            return self.frame_actual
             
         except Exception as e:
             print(f"❌ Error leyendo frame: {e}")
@@ -196,53 +227,94 @@ class CamaraIMX500:
         return frame
     
     def simular_detecciones(self, frame):
-        """Simula detecciones de personas (en producción esto vendría de la IMX500)"""
+        """Detecta personas usando HOG detector optimizado con logging mejorado"""
         try:
-            # Usar HOG detector como fallback
+            # Usar HOG detector como detector principal
             hog = cv2.HOGDescriptor()
             hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
             
-            # Detectar personas
+            # Redimensionar frame para mejor rendimiento si es muy grande
+            frame_procesar = frame
+            scale_factor = 1.0
+            if frame.shape[0] > 480 or frame.shape[1] > 640:
+                scale_factor = min(480.0 / frame.shape[0], 640.0 / frame.shape[1])
+                new_width = int(frame.shape[1] * scale_factor)
+                new_height = int(frame.shape[0] * scale_factor)
+                frame_procesar = cv2.resize(frame, (new_width, new_height))
+            
+            # Detectar personas con parámetros optimizados para Raspberry Pi
             boxes, weights = hog.detectMultiScale(
-                frame, 
-                winStride=(8, 8),
-                padding=(4, 4),
-                scale=1.05,
-                hitThreshold=0
+                frame_procesar, 
+                winStride=(4, 4),  # Más agresivo para detectar más personas
+                padding=(2, 2),    # Padding reducido
+                scale=1.02,        # Escala más fina
+                hitThreshold=0     # Sin umbral de hit
             )
             
             detecciones = []
+            if len(boxes) > 0:
+                print(f"🔍 HOG detectó {len(boxes)} candidatos con pesos: {weights}")
+            
             for (x, y, w, h), weight in zip(boxes, weights):
-                # Filtrar por confianza mínima
+                # Filtrar por confianza mínima (más permisivo)
                 if weight > self.config['confianza_minima']:
                     # Filtrar por área mínima
                     area = w * h
                     if area > self.config['area_minima']:
+                        # Ajustar coordenadas si se redimensionó
+                        if frame_procesar is not frame:
+                            scale_inv = 1.0 / scale_factor
+                            x = int(x * scale_inv)
+                            y = int(y * scale_inv)
+                            w = int(w * scale_inv)
+                            h = int(h * scale_inv)
+                        
                         # Aplicar ROI de puerta
                         centro_x = x + w // 2
                         centro_y = y + h // 2
                         
                         if self.esta_en_roi_puerta([centro_x, centro_y]):
-                            detecciones.append(Deteccion(
+                            deteccion = Deteccion(
                                 timestamp=time.time(),
                                 bbox=[x, y, x + w, y + h],
                                 confianza=float(weight),
                                 centro=[centro_x, centro_y],
                                 area=area
-                            ))
+                            )
+                            detecciones.append(deteccion)
+                            print(f"✅ Persona detectada: conf={weight:.3f}, centro=({centro_x},{centro_y}), área={area}")
+                        else:
+                            print(f"⚠️ Persona fuera del ROI: conf={weight:.3f}, centro=({centro_x},{centro_y})")
+                    else:
+                        print(f"⚠️ Persona muy pequeña: conf={weight:.3f}, área={area}")
+                else:
+                    print(f"⚠️ Persona con baja confianza: {weight:.3f}")
             
             # Actualizar métricas de inferencia
             timestamp = time.time()
             self.timestamps_inferencia.append(timestamp)
             
             if len(self.timestamps_inferencia) >= 2:
-                self.fps_inferencia = len(self.timestamps_inferencia) / (self.timestamps_inferencia[-1] - self.timestamps_inferencia[0])
+                # Calcular FPS de inferencia de manera más robusta
+                recent_timestamps = list(self.timestamps_inferencia)[-10:]
+                if len(recent_timestamps) >= 2:
+                    time_span = recent_timestamps[-1] - recent_timestamps[0]
+                    if time_span > 0:
+                        self.fps_inferencia = (len(recent_timestamps) - 1) / time_span
             
             self.detecciones_actuales = detecciones
+            
+            if len(detecciones) > 0:
+                print(f"🎯 Total personas detectadas en ROI: {len(detecciones)}")
+            else:
+                print(f"❌ No se detectaron personas en este frame")
+            
             return detecciones
             
         except Exception as e:
-            print(f"❌ Error simulando detecciones: {e}")
+            print(f"❌ Error en detección: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def esta_en_roi_puerta(self, centro):
@@ -271,9 +343,12 @@ class TrackerPersonas:
         self.personas_en_habitacion = 0
     
     def actualizar_tracking(self, detecciones):
-        """Actualiza el tracking de personas"""
+        """Actualiza el tracking de personas con logging mejorado"""
         # Buscar tracks más cercanos
         personas_actuales = {}
+        
+        if len(detecciones) > 0:
+            print(f"🔄 Procesando {len(detecciones)} detecciones para tracking...")
         
         for deteccion in detecciones:
             # Buscar track más cercano
@@ -295,6 +370,8 @@ class TrackerPersonas:
                 track_id = self.next_track_id
                 self.next_track_id += 1
                 
+                print(f"🆔 Nuevo track creado: ID={track_id}, centro=({deteccion.centro[0]},{deteccion.centro[1]})")
+                
                 self.tracks[track_id] = Track(
                     id=track_id,
                     detecciones=deque(maxlen=self.config['historial_maxlen']),
@@ -302,6 +379,8 @@ class TrackerPersonas:
                     ultimo_timestamp=deteccion.timestamp,
                     estado='fuera'
                 )
+            else:
+                print(f"🔄 Track {track_id} actualizado: distancia={distancia_minima:.1f}px")
             
             # Actualizar track
             track = self.tracks[track_id]
@@ -312,11 +391,16 @@ class TrackerPersonas:
             personas_actuales[track_id] = track
         
         # Limpiar tracks obsoletos
-        self.limpiar_tracks_obsoletos()
+        tracks_eliminados = self.limpiar_tracks_obsoletos()
+        if tracks_eliminados > 0:
+            print(f"🧹 {tracks_eliminados} tracks obsoletos eliminados")
         
         # Verificar cruce de línea
-        self.verificar_cruce_linea()
+        eventos_detectados = self.verificar_cruce_linea()
+        if eventos_detectados > 0:
+            print(f"🚪 {eventos_detectados} eventos de cruce detectados")
         
+        print(f"📊 Estado actual: {len(personas_actuales)} tracks activos, {len(self.tracks)} total")
         return personas_actuales
     
     def limpiar_tracks_obsoletos(self):
@@ -332,35 +416,46 @@ class TrackerPersonas:
         
         for tid in tracks_a_eliminar:
             del self.tracks[tid]
+        return len(tracks_a_eliminar)
     
     def verificar_cruce_linea(self):
-        """Verifica si una persona cruzó la línea virtual"""
+        """Verifica si una persona cruzó la línea virtual con logging mejorado"""
+        eventos_detectados = 0
+        linea_x = self.config['linea_cruce']
+        ancho_banda = self.config['ancho_banda_cruce']
+        
         for tid, track in self.tracks.items():
             # Verificar si hay suficientes detecciones para determinar dirección
-            if len(track.detecciones) < 3:
+            if len(track.detecciones) < 2:  # Reducido de 3 a 2
                 continue
             
             # Obtener posiciones X de las últimas detecciones
-            posiciones_x = [d.centro[0] for d in list(track.detecciones)[-3:]]
+            posiciones_x = [d.centro[0] for d in list(track.detecciones)[-2:]]  # Solo últimas 2
             
             # Calcular dirección del movimiento
             x_inicial = posiciones_x[0]
             x_final = posiciones_x[-1]
             diferencia_x = x_final - x_inicial
             
-            # Verificar si cruzó la línea
-            linea_x = self.config['linea_cruce']
-            ancho_banda = self.config['ancho_banda_cruce']
-            
             # Verificar si está en la banda de cruce
             en_banda_cruce = abs(track.ultima_posicion[0] - linea_x) <= ancho_banda
             
             if en_banda_cruce:
-                # Determinar dirección
+                print(f"🎯 Track {tid} en banda de cruce: X={track.ultima_posicion[0]}, diferencia={diferencia_x:.1f}")
+                
+                # Determinar dirección con umbral más sensible
                 if diferencia_x > self.config['umbral_movimiento']:  # Movimiento hacia la derecha = entrada
-                    self.registrar_evento(tid, 'entrada', track.ultimo_timestamp)
+                    print(f"➡️ Movimiento hacia DERECHA detectado (entrada)")
+                    if self.registrar_evento(tid, 'entrada', track.ultimo_timestamp):
+                        eventos_detectados += 1
                 elif diferencia_x < -self.config['umbral_movimiento']:  # Movimiento hacia la izquierda = salida
-                    self.registrar_evento(tid, 'salida', track.ultimo_timestamp)
+                    print(f"⬅️ Movimiento hacia IZQUIERDA detectado (salida)")
+                    if self.registrar_evento(tid, 'salida', track.ultimo_timestamp):
+                        eventos_detectados += 1
+                else:
+                    print(f"⏸️ Movimiento insuficiente: {diferencia_x:.1f} < {self.config['umbral_movimiento']}")
+        
+        return eventos_detectados
     
     def registrar_evento(self, track_id, tipo_evento, timestamp):
         """Registra un evento de entrada/salida"""
@@ -370,11 +465,11 @@ class TrackerPersonas:
         tiempo_desde_ultimo = (timestamp - track.ultimo_evento_timestamp) * 1000  # ms
         
         if tiempo_desde_ultimo < self.config['debounce_ms']:
-            return
+            return False # No registrar si el evento es demasiado rápido
         
         # Verificar que no sea el mismo evento
         if track.ultimo_evento == tipo_evento:
-            return
+            return False # No registrar si es el mismo evento
         
         # Registrar evento
         track.ultimo_evento = tipo_evento
@@ -391,6 +486,7 @@ class TrackerPersonas:
             self.personas_en_habitacion = max(0, self.personas_en_habitacion - 1)
             track.estado = 'fuera'
             print(f"🚪 PERSONA SALIÓ - ID: {track_id} - Total: {self.contador_salidas}")
+        return True # Evento registrado
 
 class ServidorStreaming:
     """Servidor web Flask para streaming en vivo"""
@@ -465,24 +561,41 @@ class ServidorStreaming:
             })
     
     def generar_stream(self):
-        """Genera el stream MJPEG en vivo"""
+        """Genera el stream MJPEG en vivo optimizado"""
+        frame_skip = 0  # Contador para saltar frames si es necesario
+        max_frame_skip = 2  # Máximo frames a saltar
+        frame_counter = 0  # Contador de frames para procesar detecciones
+        
         while True:
             try:
                 # Leer frame de la cámara
                 frame = self.camara.leer_frame()
                 
                 if frame is not None:
-                    # Procesar detecciones
-                    detecciones = self.camara.simular_detecciones(frame)
+                    frame_counter += 1
                     
-                    # Actualizar tracking
-                    personas_actuales = self.tracker.actualizar_tracking(detecciones)
+                    # Procesar detecciones solo cada 3 frames para mantener FPS
+                    if frame_counter % 3 == 0:
+                        # Procesar detecciones
+                        detecciones = self.camara.simular_detecciones(frame)
+                        
+                        # Actualizar tracking
+                        personas_actuales = self.tracker.actualizar_tracking(detecciones)
+                        
+                        # Dibujar anotaciones en el frame
+                        frame_anotado = self.dibujar_anotaciones(frame, detecciones, personas_actuales)
+                    else:
+                        # Frame sin procesar, solo dibujar contadores básicos
+                        frame_anotado = self.dibujar_anotaciones(frame, [], {})
                     
-                    # Dibujar anotaciones en el frame
-                    frame_anotado = self.dibujar_anotaciones(frame, detecciones, personas_actuales)
+                    # Convertir a JPEG con calidad optimizada
+                    encode_params = [
+                        cv2.IMWRITE_JPEG_QUALITY, 85,  # Calidad JPEG
+                        cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Optimización
+                        cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Sin progresivo
+                    ]
                     
-                    # Convertir a JPEG
-                    ret, buffer = cv2.imencode('.jpg', frame_anotado, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    ret, buffer = cv2.imencode('.jpg', frame_anotado, encode_params)
                     
                     if ret:
                         # Generar frame MJPEG
@@ -494,15 +607,22 @@ class ServidorStreaming:
                         self.frame_count += 1
                         yield frame_data
                 
-                # Control de FPS
-                time.sleep(1.0 / self.config['fps_objetivo'])
+                # Control de FPS adaptativo
+                target_delay = 1.0 / self.config['fps_objetivo']
+                if self.camara.fps_captura > 0:
+                    # Ajustar delay basado en FPS real
+                    actual_delay = 1.0 / self.camara.fps_captura
+                    if actual_delay < target_delay:
+                        time.sleep(target_delay - actual_delay)
+                else:
+                    time.sleep(target_delay)
                 
             except Exception as e:
                 print(f"❌ Error en stream: {e}")
                 time.sleep(0.1)
     
     def dibujar_anotaciones(self, frame, detecciones, personas_actuales):
-        """Dibuja anotaciones en el frame"""
+        """Dibuja anotaciones en el frame de manera optimizada y visible"""
         frame_anotado = frame.copy()
         
         # Dibujar ROI de la puerta
@@ -511,13 +631,18 @@ class ServidorStreaming:
         cv2.putText(frame_anotado, 'ROI Puerta', (x1, y1-10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Dibujar línea de cruce
+        # Dibujar línea de cruce con más visibilidad
         linea_x = self.config['linea_cruce']
         cv2.line(frame_anotado, (linea_x, 0), (linea_x, frame.shape[0]), (255, 0, 0), 3)
         cv2.putText(frame_anotado, 'Línea Cruce', (linea_x+10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
         
-        # Dibujar detecciones
+        # Dibujar banda de cruce
+        ancho_banda = self.config['ancho_banda_cruce']
+        cv2.line(frame_anotado, (linea_x - ancho_banda, 0), (linea_x - ancho_banda, frame.shape[0]), (0, 255, 255), 1)
+        cv2.line(frame_anotado, (linea_x + ancho_banda, 0), (linea_x + ancho_banda, frame.shape[0]), (0, 255, 255), 1)
+        
+        # Dibujar detecciones de manera más visible
         for deteccion in detecciones:
             x1, y1, x2, y2 = deteccion.bbox
             confianza = deteccion.confianza
@@ -530,21 +655,38 @@ class ServidorStreaming:
             else:
                 color = (0, 0, 255)  # Rojo
             
-            # Bounding box
-            cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), color, 2)
+            # Bounding box más grueso
+            cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), color, 3)
             
-            # Etiqueta de confianza
+            # Etiqueta de confianza más visible
             label = f'Persona: {confianza:.2f}'
-            cv2.putText(frame_anotado, label, (x1, y1-10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
             
-            # Centro de la persona
-            cv2.circle(frame_anotado, tuple(deteccion.centro), 3, color, -1)
+            # Fondo para la etiqueta
+            cv2.rectangle(frame_anotado, (x1, y1-label_size[1]-10), (x1+label_size[0], y1), color, -1)
+            cv2.putText(frame_anotado, label, (x1, y1-5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Centro de la persona más visible
+            cv2.circle(frame_anotado, tuple(deteccion.centro), 5, color, -1)
+            cv2.circle(frame_anotado, tuple(deteccion.centro), 8, (255, 255, 255), 2)
         
-        # Dibujar contadores
+        # Dibujar tracks activos
+        for track_id, track in personas_actuales.items():
+            if track.ultima_posicion:
+                # Dibujar ID del track
+                cv2.putText(frame_anotado, f'ID:{track_id}', 
+                           (track.ultima_posicion[0]-20, track.ultima_posicion[1]-20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                
+                # Dibujar historial de movimiento
+                if len(track.detecciones) > 1:
+                    puntos = [(d.centro[0], d.centro[1]) for d in list(track.detecciones)[-5:]]
+                    for i in range(1, len(puntos)):
+                        cv2.line(frame_anotado, puntos[i-1], puntos[i], (255, 255, 0), 2)
+        
+        # Dibujar contadores y métricas
         self.dibujar_contadores(frame_anotado)
-        
-        # Dibujar métricas
         self.dibujar_metricas(frame_anotado)
         
         return frame_anotado
