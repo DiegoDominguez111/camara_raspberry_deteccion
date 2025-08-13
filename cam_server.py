@@ -40,6 +40,8 @@ class Track:
     estado: str  # 'entrando', 'saliendo', 'en_habitacion', 'fuera'
     ultimo_evento: Optional[str] = None
     ultimo_evento_timestamp: float = 0.0
+    activo: bool = True # Nuevo campo para indicar si el track está activo
+    frames_sin_detectar: int = 0 # Nuevo campo para contar frames sin detectar
 
 class CamaraIMX500:
     """Clase para manejar la cámara IMX500"""
@@ -227,36 +229,31 @@ class CamaraIMX500:
         return frame
     
     def simular_detecciones(self, frame):
-        """Detecta personas usando HOG detector optimizado con logging mejorado"""
+        """Detecta personas usando HOG detector optimizado para Raspberry Pi"""
         try:
             # Usar HOG detector como detector principal
             hog = cv2.HOGDescriptor()
             hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
             
-            # Redimensionar frame para mejor rendimiento si es muy grande
+            # Mantener resolución optimizada para Raspberry Pi
             frame_procesar = frame
             scale_factor = 1.0
-            if frame.shape[0] > 480 or frame.shape[1] > 640:
-                scale_factor = min(480.0 / frame.shape[0], 640.0 / frame.shape[1])
-                new_width = int(frame.shape[1] * scale_factor)
-                new_height = int(frame.shape[0] * scale_factor)
-                frame_procesar = cv2.resize(frame, (new_width, new_height))
             
-            # Detectar personas con parámetros optimizados para Raspberry Pi
+            # Detectar personas con parámetros optimizados para rendimiento
             boxes, weights = hog.detectMultiScale(
                 frame_procesar, 
-                winStride=(4, 4),  # Más agresivo para detectar más personas
-                padding=(2, 2),    # Padding reducido
-                scale=1.02,        # Escala más fina
-                hitThreshold=0     # Sin umbral de hit
+                winStride=(8, 8),      # Eficiente para Raspberry Pi
+                padding=(4, 4),        # Padding estándar
+                scale=1.05,            # Escala eficiente
+                hitThreshold=0         # Sin umbral de hit
             )
             
             detecciones = []
             if len(boxes) > 0:
-                print(f"🔍 HOG detectó {len(boxes)} candidatos con pesos: {weights}")
+                print(f"🔍 HOG detectó {len(boxes)} candidatos")
             
             for (x, y, w, h), weight in zip(boxes, weights):
-                # Filtrar por confianza mínima (más permisivo)
+                # Filtrar por confianza mínima
                 if weight > self.config['confianza_minima']:
                     # Filtrar por área mínima
                     area = w * h
@@ -282,13 +279,18 @@ class CamaraIMX500:
                                 area=area
                             )
                             detecciones.append(deteccion)
-                            print(f"✅ Persona detectada: conf={weight:.3f}, centro=({centro_x},{centro_y}), área={area}")
+                            print(f"✅ Persona detectada: conf={weight:.3f}, centro=({centro_x},{centro_y})")
                         else:
                             print(f"⚠️ Persona fuera del ROI: conf={weight:.3f}, centro=({centro_x},{centro_y})")
                     else:
                         print(f"⚠️ Persona muy pequeña: conf={weight:.3f}, área={area}")
                 else:
                     print(f"⚠️ Persona con baja confianza: {weight:.3f}")
+            
+            # Aplicar NMS para eliminar detecciones duplicadas
+            if len(detecciones) > 1:
+                detecciones = self.aplicar_nms(detecciones)
+                print(f"🎯 Después de NMS: {len(detecciones)} detecciones únicas")
             
             # Actualizar métricas de inferencia
             timestamp = time.time()
@@ -317,6 +319,102 @@ class CamaraIMX500:
             traceback.print_exc()
             return []
     
+    def filtrar_por_estabilidad(self, detecciones):
+        """Filtra detecciones por estabilidad temporal para mejorar persistencia"""
+        if not hasattr(self, 'detecciones_historial'):
+            self.detecciones_historial = []
+        
+        # Agregar detecciones actuales al historial
+        self.detecciones_historial.append({
+            'timestamp': time.time(),
+            'detecciones': detecciones
+        })
+        
+        # Mantener solo el historial reciente
+        tiempo_limite = time.time() - (self.config.get('tiempo_persistencia_ms', 3000) / 1000.0)
+        self.detecciones_historial = [h for h in self.detecciones_historial if h['timestamp'] > tiempo_limite]
+        
+        if len(self.detecciones_historial) < 2:
+            return detecciones
+        
+        # Filtrar detecciones que aparecen consistentemente
+        detecciones_estables = []
+        for deteccion in detecciones:
+            apariciones = 0
+            for historial in self.detecciones_historial:
+                for det_hist in historial['detecciones']:
+                    # Verificar si es la misma persona (misma área)
+                    if self.es_misma_persona(deteccion, det_hist):
+                        apariciones += 1
+                        break
+            
+            # Una detección es estable si aparece en al menos 2 frames
+            if apariciones >= 2:
+                detecciones_estables.append(deteccion)
+                print(f"🔒 Detección estable: conf={deteccion.confianza:.3f}, apariciones={apariciones}")
+        
+        return detecciones_estables
+    
+    def es_misma_persona(self, det1, det2):
+        """Determina si dos detecciones son de la misma persona"""
+        # Calcular IoU
+        iou = self.calcular_iou(det1.bbox, det2.bbox)
+        
+        # Calcular distancia entre centros
+        distancia = np.sqrt(
+            (det1.centro[0] - det2.centro[0])**2 +
+            (det1.centro[1] - det2.centro[1])**2
+        )
+        
+        # Es la misma persona si IoU > 0.3 o distancia < 30px
+        return iou > 0.3 or distancia < 30
+    
+    def aplicar_nms(self, detecciones):
+        """Aplica Non-Maximum Suppression para eliminar detecciones duplicadas"""
+        if len(detecciones) <= 1:
+            return detecciones
+        
+        # Ordenar por confianza (mayor a menor)
+        detecciones_ordenadas = sorted(detecciones, key=lambda x: x.confianza, reverse=True)
+        detecciones_finales = []
+        
+        for deteccion in detecciones_ordenadas:
+            # Verificar si esta detección se superpone significativamente con alguna ya seleccionada
+            es_duplicada = False
+            for det_final in detecciones_finales:
+                iou = self.calcular_iou(deteccion.bbox, det_final.bbox)
+                if iou > self.config['nms_iou']:
+                    es_duplicada = True
+                    break
+            
+            if not es_duplicada:
+                detecciones_finales.append(deteccion)
+        
+        return detecciones_finales
+    
+    def calcular_iou(self, bbox1, bbox2):
+        """Calcula el Intersection over Union entre dos bounding boxes"""
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        
+        # Calcular intersección
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+        
+        if x2_i <= x1_i or y2_i <= y1_i:
+            return 0.0
+        
+        area_interseccion = (x2_i - x1_i) * (y2_i - y1_i)
+        
+        # Calcular unión
+        area_bbox1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area_bbox2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        area_union = area_bbox1 + area_bbox2 - area_interseccion
+        
+        return area_interseccion / area_union if area_union > 0 else 0.0
+    
     def esta_en_roi_puerta(self, centro):
         """Verifica si un punto está en el ROI de la puerta"""
         x, y = centro
@@ -341,9 +439,12 @@ class TrackerPersonas:
         self.contador_entradas = 0
         self.contador_salidas = 0
         self.personas_en_habitacion = 0
+        
+        # Diccionario para almacenar los últimos eventos registrados
+        self.eventos_recientes: Dict[int, Dict] = {}
     
     def actualizar_tracking(self, detecciones):
-        """Actualiza el tracking de personas con logging mejorado"""
+        """Actualiza el tracking de personas de manera ligera para Raspberry Pi"""
         # Buscar tracks más cercanos
         personas_actuales = {}
         
@@ -388,14 +489,31 @@ class TrackerPersonas:
             track.ultima_posicion = deteccion.centro
             track.ultimo_timestamp = deteccion.timestamp
             
+            # Marcar track como activo
+            track.activo = True
+            track.frames_sin_detectar = 0
+            
             personas_actuales[track_id] = track
+        
+        # Actualizar tracks existentes (mantener activos por menos tiempo para ahorrar CPU)
+        for tid, track in self.tracks.items():
+            if tid not in personas_actuales:
+                # Incrementar contador de frames sin detectar
+                track.frames_sin_detectar += 1
+                
+                # Mantener track activo por menos tiempo
+                if track.frames_sin_detectar < 3:  # Solo 3 frames
+                    track.activo = True
+                    personas_actuales[tid] = track
+                else:
+                    track.activo = False
         
         # Limpiar tracks obsoletos
         tracks_eliminados = self.limpiar_tracks_obsoletos()
         if tracks_eliminados > 0:
             print(f"🧹 {tracks_eliminados} tracks obsoletos eliminados")
         
-        # Verificar cruce de línea
+        # Verificar cruce de línea con tracking ligero
         eventos_detectados = self.verificar_cruce_linea()
         if eventos_detectados > 0:
             print(f"🚪 {eventos_detectados} eventos de cruce detectados")
@@ -419,74 +537,110 @@ class TrackerPersonas:
         return len(tracks_a_eliminar)
     
     def verificar_cruce_linea(self):
-        """Verifica si una persona cruzó la línea virtual con logging mejorado"""
+        """Verifica cruces de línea de manera simple y eficiente"""
         eventos_detectados = 0
         linea_x = self.config['linea_cruce']
         ancho_banda = self.config['ancho_banda_cruce']
         
-        for tid, track in self.tracks.items():
-            # Verificar si hay suficientes detecciones para determinar dirección
-            if len(track.detecciones) < 2:  # Reducido de 3 a 2
+        for track_id, track in self.tracks.items():
+            if not track.activo or len(track.detecciones) < 2:
                 continue
             
-            # Obtener posiciones X de las últimas detecciones
-            posiciones_x = [d.centro[0] for d in list(track.detecciones)[-2:]]  # Solo últimas 2
+            # Obtener solo las últimas 2 posiciones para determinar dirección
+            ultimas_detecciones = list(track.detecciones)[-2:]
             
-            # Calcular dirección del movimiento
-            x_inicial = posiciones_x[0]
-            x_final = posiciones_x[-1]
-            diferencia_x = x_final - x_inicial
+            # Verificar si la persona está cruzando la línea
+            posicion_actual = ultimas_detecciones[-1].centro
+            posicion_anterior = ultimas_detecciones[-2].centro
             
-            # Verificar si está en la banda de cruce
-            en_banda_cruce = abs(track.ultima_posicion[0] - linea_x) <= ancho_banda
+            # Calcular si está dentro de la banda de cruce
+            en_banda_actual = abs(posicion_actual[0] - linea_x) <= ancho_banda
+            en_banda_anterior = abs(posicion_anterior[0] - linea_x) <= ancho_banda
             
-            if en_banda_cruce:
-                print(f"🎯 Track {tid} en banda de cruce: X={track.ultima_posicion[0]}, diferencia={diferencia_x:.1f}")
+            # Solo procesar si está en la banda de cruce
+            if en_banda_actual or en_banda_anterior:
+                # Calcular movimiento horizontal
+                movimiento_x = posicion_actual[0] - posicion_anterior[0]
                 
-                # Determinar dirección con umbral más sensible
-                if diferencia_x > self.config['umbral_movimiento']:  # Movimiento hacia la derecha = entrada
-                    print(f"➡️ Movimiento hacia DERECHA detectado (entrada)")
-                    if self.registrar_evento(tid, 'entrada', track.ultimo_timestamp):
+                # Verificar si hay movimiento horizontal significativo
+                if abs(movimiento_x) > self.config['umbral_movimiento']:
+                    # Determinar dirección
+                    if movimiento_x > 0:
+                        direccion = 'derecha'  # Entrada
+                        evento = 'entrada'
+                    else:
+                        direccion = 'izquierda'  # Salida
+                        evento = 'salida'
+                    
+                    print(f"🎯 Track {track_id} cruzando línea: {direccion} (movimiento_x={movimiento_x:.1f})")
+                    
+                    # Registrar evento si no se ha registrado recientemente
+                    if self.registrar_evento(track_id, evento, posicion_actual):
                         eventos_detectados += 1
-                elif diferencia_x < -self.config['umbral_movimiento']:  # Movimiento hacia la izquierda = salida
-                    print(f"⬅️ Movimiento hacia IZQUIERDA detectado (salida)")
-                    if self.registrar_evento(tid, 'salida', track.ultimo_timestamp):
-                        eventos_detectados += 1
-                else:
-                    print(f"⏸️ Movimiento insuficiente: {diferencia_x:.1f} < {self.config['umbral_movimiento']}")
+                        print(f"✅ Evento {evento} registrado para track {track_id}")
+                    else:
+                        print(f"⚠️ Evento {evento} ya registrado recientemente para track {track_id}")
         
         return eventos_detectados
     
-    def registrar_evento(self, track_id, tipo_evento, timestamp):
-        """Registra un evento de entrada/salida"""
-        track = self.tracks[track_id]
+    def registrar_evento(self, track_id, tipo_evento, posicion):
+        """Registra un evento de entrada o salida con anti-rebote mejorado"""
+        timestamp_actual = time.time()
         
-        # Verificar debounce
-        tiempo_desde_ultimo = (timestamp - track.ultimo_evento_timestamp) * 1000  # ms
+        # Verificar si este track ya registró un evento recientemente
+        if track_id in self.eventos_recientes:
+            ultimo_evento = self.eventos_recientes[track_id]
+            tiempo_transcurrido = timestamp_actual - ultimo_evento['timestamp']
+            
+            # Si es el mismo tipo de evento, aplicar debounce más estricto
+            if ultimo_evento['tipo'] == tipo_evento:
+                if tiempo_transcurrido < (self.config['debounce_ms'] / 1000.0):
+                    print(f"🔄 Debounce activo para track {track_id}: {tipo_evento} (tiempo: {tiempo_transcurrido:.1f}s)")
+                    return False
+            else:
+                # Si es diferente tipo de evento, permitir más rápido
+                if tiempo_transcurrido < (self.config['debounce_ms'] / 2000.0):
+                    print(f"🔄 Debounce activo para track {track_id}: cambio de {ultimo_evento['tipo']} a {tipo_evento}")
+                    return False
         
-        if tiempo_desde_ultimo < self.config['debounce_ms']:
-            return False # No registrar si el evento es demasiado rápido
+        # Verificar si hay demasiados eventos del mismo tipo recientemente
+        eventos_mismo_tipo = [e for e in self.eventos_recientes.values() 
+                             if e['tipo'] == tipo_evento and 
+                             timestamp_actual - e['timestamp'] < 2.0]  # Últimos 2 segundos
         
-        # Verificar que no sea el mismo evento
-        if track.ultimo_evento == tipo_evento:
-            return False # No registrar si es el mismo evento
+        if len(eventos_mismo_tipo) >= 3:
+            print(f"⚠️ Demasiados eventos {tipo_evento} recientemente ({len(eventos_mismo_tipo)}), aplicando filtro")
+            return False
         
-        # Registrar evento
-        track.ultimo_evento = tipo_evento
-        track.ultimo_evento_timestamp = timestamp
+        # Registrar el evento
+        self.eventos_recientes[track_id] = {
+            'tipo': tipo_evento,
+            'timestamp': timestamp_actual,
+            'posicion': posicion
+        }
         
         # Actualizar contadores
         if tipo_evento == 'entrada':
             self.contador_entradas += 1
-            self.personas_en_habitacion += 1
-            track.estado = 'en_habitacion'
-            print(f"🚪 PERSONA ENTRÓ - ID: {track_id} - Total: {self.contador_entradas}")
-        else:  # salida
+            print(f"🚪 ENTRADA registrada para track {track_id} - Total: {self.contador_entradas}")
+        elif tipo_evento == 'salida':
             self.contador_salidas += 1
-            self.personas_en_habitacion = max(0, self.personas_en_habitacion - 1)
-            track.estado = 'fuera'
-            print(f"🚪 PERSONA SALIÓ - ID: {track_id} - Total: {self.contador_salidas}")
-        return True # Evento registrado
+            print(f"🚪 SALIDA registrada para track {track_id} - Total: {self.contador_salidas}")
+        
+        # Limpiar eventos antiguos
+        self.limpiar_eventos_antiguos()
+        
+        return True
+    
+    def limpiar_eventos_antiguos(self):
+        """Limpia los eventos registrados que son demasiado antiguos"""
+        timestamp_actual = time.time()
+        eventos_a_eliminar = []
+        for track_id, evento in self.eventos_recientes.items():
+            if timestamp_actual - evento['timestamp'] > 10.0: # Mantener eventos por 10 segundos
+                eventos_a_eliminar.append(track_id)
+        for tid in eventos_a_eliminar:
+            del self.eventos_recientes[tid]
 
 class ServidorStreaming:
     """Servidor web Flask para streaming en vivo"""
@@ -561,10 +715,10 @@ class ServidorStreaming:
             })
     
     def generar_stream(self):
-        """Genera el stream MJPEG en vivo optimizado"""
-        frame_skip = 0  # Contador para saltar frames si es necesario
-        max_frame_skip = 2  # Máximo frames a saltar
+        """Genera el stream MJPEG en vivo optimizado para Raspberry Pi"""
         frame_counter = 0  # Contador de frames para procesar detecciones
+        detecciones_cache = []  # Cache de detecciones para frames intermedios
+        personas_cache = {}  # Cache de tracking para frames intermedios
         
         while True:
             try:
@@ -574,23 +728,30 @@ class ServidorStreaming:
                 if frame is not None:
                     frame_counter += 1
                     
-                    # Procesar detecciones solo cada 3 frames para mantener FPS
-                    if frame_counter % 3 == 0:
+                    # Procesar detecciones cada 2 frames para balance rendimiento/precisión
+                    procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
+                    
+                    if procesar_detecciones:
                         # Procesar detecciones
                         detecciones = self.camara.simular_detecciones(frame)
+                        detecciones_cache = detecciones
                         
                         # Actualizar tracking
                         personas_actuales = self.tracker.actualizar_tracking(detecciones)
+                        personas_cache = personas_actuales
                         
-                        # Dibujar anotaciones en el frame
-                        frame_anotado = self.dibujar_anotaciones(frame, detecciones, personas_actuales)
+                        print(f"🔄 Frame {frame_counter}: Procesando detecciones - {len(detecciones)} personas, {len(personas_actuales)} tracks")
                     else:
-                        # Frame sin procesar, solo dibujar contadores básicos
-                        frame_anotado = self.dibujar_anotaciones(frame, [], {})
+                        # Usar cache de detecciones y tracking
+                        detecciones = detecciones_cache
+                        personas_actuales = personas_cache
                     
-                    # Convertir a JPEG con calidad optimizada
+                    # Dibujar anotaciones simplificadas
+                    frame_anotado = self.dibujar_anotaciones(frame, detecciones, personas_actuales)
+                    
+                    # Convertir a JPEG con calidad optimizada para Raspberry Pi
                     encode_params = [
-                        cv2.IMWRITE_JPEG_QUALITY, 85,  # Calidad JPEG
+                        cv2.IMWRITE_JPEG_QUALITY, 80,  # Calidad reducida para mejor rendimiento
                         cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Optimización
                         cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Sin progresivo
                     ]
@@ -607,83 +768,60 @@ class ServidorStreaming:
                         self.frame_count += 1
                         yield frame_data
                 
-                # Control de FPS adaptativo
+                # Control de FPS optimizado
                 target_delay = 1.0 / self.config['fps_objetivo']
-                if self.camara.fps_captura > 0:
-                    # Ajustar delay basado en FPS real
-                    actual_delay = 1.0 / self.camara.fps_captura
-                    if actual_delay < target_delay:
-                        time.sleep(target_delay - actual_delay)
-                else:
-                    time.sleep(target_delay)
+                time.sleep(target_delay)
                 
             except Exception as e:
                 print(f"❌ Error en stream: {e}")
                 time.sleep(0.1)
     
     def dibujar_anotaciones(self, frame, detecciones, personas_actuales):
-        """Dibuja anotaciones en el frame de manera optimizada y visible"""
+        """Dibuja anotaciones simplificadas: solo puntos y línea de cruce"""
         frame_anotado = frame.copy()
         
         # Dibujar ROI de la puerta
         x1, y1, x2, y2 = self.config['roi_puerta']
         cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame_anotado, 'ROI Puerta', (x1, y1-10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
-        # Dibujar línea de cruce con más visibilidad
+        # Dibujar línea de cruce
         linea_x = self.config['linea_cruce']
         cv2.line(frame_anotado, (linea_x, 0), (linea_x, frame.shape[0]), (255, 0, 0), 3)
-        cv2.putText(frame_anotado, 'Línea Cruce', (linea_x+10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        cv2.putText(frame_anotado, 'Línea Cruce', (linea_x+10, 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
         # Dibujar banda de cruce
         ancho_banda = self.config['ancho_banda_cruce']
         cv2.line(frame_anotado, (linea_x - ancho_banda, 0), (linea_x - ancho_banda, frame.shape[0]), (0, 255, 255), 1)
         cv2.line(frame_anotado, (linea_x + ancho_banda, 0), (linea_x + ancho_banda, frame.shape[0]), (0, 255, 255), 1)
         
-        # Dibujar detecciones de manera más visible
+        # Dibujar solo puntos en el centro de las personas detectadas
         for deteccion in detecciones:
-            x1, y1, x2, y2 = deteccion.bbox
+            centro_x, centro_y = deteccion.centro
             confianza = deteccion.confianza
             
             # Color basado en confianza
-            if confianza > 0.7:
+            if confianza > self.config.get('umbral_confianza_alto', 0.6):
                 color = (0, 255, 0)  # Verde
-            elif confianza > 0.5:
+            elif confianza > self.config.get('umbral_confianza_medio', 0.4):
                 color = (0, 255, 255)  # Amarillo
             else:
                 color = (0, 0, 255)  # Rojo
             
-            # Bounding box más grueso
-            cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), color, 3)
+            # Dibujar punto en el centro
+            cv2.circle(frame_anotado, (centro_x, centro_y), 6, color, -1)
+            cv2.circle(frame_anotado, (centro_x, centro_y), 8, (255, 255, 255), 2)
             
-            # Etiqueta de confianza más visible
-            label = f'Persona: {confianza:.2f}'
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-            
-            # Fondo para la etiqueta
-            cv2.rectangle(frame_anotado, (x1, y1-label_size[1]-10), (x1+label_size[0], y1), color, -1)
-            cv2.putText(frame_anotado, label, (x1, y1-5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Centro de la persona más visible
-            cv2.circle(frame_anotado, tuple(deteccion.centro), 5, color, -1)
-            cv2.circle(frame_anotado, tuple(deteccion.centro), 8, (255, 255, 255), 2)
-        
-        # Dibujar tracks activos
-        for track_id, track in personas_actuales.items():
-            if track.ultima_posicion:
-                # Dibujar ID del track
-                cv2.putText(frame_anotado, f'ID:{track_id}', 
-                           (track.ultima_posicion[0]-20, track.ultima_posicion[1]-20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                
-                # Dibujar historial de movimiento
-                if len(track.detecciones) > 1:
-                    puntos = [(d.centro[0], d.centro[1]) for d in list(track.detecciones)[-5:]]
-                    for i in range(1, len(puntos)):
-                        cv2.line(frame_anotado, puntos[i-1], puntos[i], (255, 255, 0), 2)
+            # Mostrar ID del track si está disponible
+            for track_id, track in personas_actuales.items():
+                if track.ultima_posicion and abs(track.ultima_posicion[0] - centro_x) < 10 and abs(track.ultima_posicion[1] - centro_y) < 10:
+                    # Dibujar ID del track
+                    cv2.putText(frame_anotado, f'ID:{track_id}', 
+                               (centro_x+10, centro_y-10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    break
         
         # Dibujar contadores y métricas
         self.dibujar_contadores(frame_anotado)
@@ -953,7 +1091,13 @@ def main():
         'gain': 1.0,
         'distancia_maxima_tracking': 100,
         'historial_maxlen': 30,
-        'umbral_movimiento': 20
+        'umbral_movimiento': 20,
+        'nms_iou': 0.5, # Nuevo parámetro para NMS
+        'procesar_cada_n_frames': 3, # Nuevo parámetro para procesar cada N frames
+        'filtro_estabilidad': True, # Nuevo parámetro para habilitar filtro de estabilidad
+        'tiempo_persistencia_ms': 3000, # Nuevo parámetro para tiempo de persistencia
+        'umbral_confianza_alto': 0.7, # Nuevo parámetro para confianza alta
+        'umbral_confianza_medio': 0.4 # Nuevo parámetro para confianza media
     }
     
     # Cargar configuración si existe
