@@ -14,7 +14,7 @@ import signal
 import sys
 import os
 from flask import Flask, Response, jsonify, render_template_string
-from flask_cors import CORS
+# Flask-CORS removido para compatibilidad
 import psutil
 from collections import deque
 from dataclasses import dataclass
@@ -648,7 +648,8 @@ class ServidorStreaming:
     def __init__(self, config):
         self.config = config
         self.app = Flask(__name__)
-        CORS(self.app)
+        # CORS removido para compatibilidad
+        # CORS(self.app)
         
         # Inicializar componentes
         self.camara = CamaraIMX500(config)
@@ -703,6 +704,24 @@ class ServidorStreaming:
                 'tracks_activos': len(self.tracker.tracks)
             })
         
+        @self.app.route('/toggle_puntos_personas', methods=['POST'])
+        def toggle_puntos_personas():
+            """Toggle para mostrar/ocultar puntos de personas"""
+            self.config['mostrar_puntos_personas'] = not self.config.get('mostrar_puntos_personas', False)
+            return jsonify({
+                'mostrar_puntos_personas': self.config['mostrar_puntos_personas'],
+                'mensaje': 'Puntos de personas ' + ('activados' if self.config['mostrar_puntos_personas'] else 'desactivados')
+            })
+        
+        @self.app.route('/toggle_linea_cruce', methods=['POST'])
+        def toggle_linea_cruce():
+            """Toggle para mostrar/ocultar línea de cruce"""
+            self.config['mostrar_linea_cruce'] = not self.config.get('mostrar_linea_cruce', True)
+            return jsonify({
+                'mostrar_linea_cruce': self.config['mostrar_linea_cruce'],
+                'mensaje': 'Línea de cruce ' + ('activada' if self.config['mostrar_linea_cruce'] else 'desactivada')
+            })
+        
         @self.app.route('/health')
         def health():
             """Estado de salud del sistema"""
@@ -728,8 +747,8 @@ class ServidorStreaming:
                 if frame is not None:
                     frame_counter += 1
                     
-                    # Procesar detecciones cada 2 frames para balance rendimiento/precisión
-                    procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
+                    # Procesar detecciones cada N frames para optimizar rendimiento
+                    procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 3) == 0
                     
                     if procesar_detecciones:
                         # Procesar detecciones
@@ -740,7 +759,9 @@ class ServidorStreaming:
                         personas_actuales = self.tracker.actualizar_tracking(detecciones)
                         personas_cache = personas_actuales
                         
-                        print(f"🔄 Frame {frame_counter}: Procesando detecciones - {len(detecciones)} personas, {len(personas_actuales)} tracks")
+                        # Log reducido para optimizar rendimiento
+                        if frame_counter % 30 == 0:  # Log cada 30 frames
+                            print(f"🔄 Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} tracks")
                     else:
                         # Usar cache de detecciones y tracking
                         detecciones = detecciones_cache
@@ -751,7 +772,7 @@ class ServidorStreaming:
                     
                     # Convertir a JPEG con calidad optimizada para Raspberry Pi
                     encode_params = [
-                        cv2.IMWRITE_JPEG_QUALITY, 80,  # Calidad reducida para mejor rendimiento
+                        cv2.IMWRITE_JPEG_QUALITY, self.config.get('calidad_jpeg', 70),
                         cv2.IMWRITE_JPEG_OPTIMIZE, 1,  # Optimización
                         cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Sin progresivo
                     ]
@@ -777,73 +798,24 @@ class ServidorStreaming:
                 time.sleep(0.1)
     
     def dibujar_anotaciones(self, frame, detecciones, personas_actuales):
-        """Dibuja anotaciones simplificadas: solo puntos y línea de cruce"""
+        """Dibuja anotaciones mínimas: solo línea de cruce y puntos de personas"""
         frame_anotado = frame.copy()
         
-        # Dibujar ROI de la puerta
-        x1, y1, x2, y2 = self.config['roi_puerta']
-        cv2.rectangle(frame_anotado, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame_anotado, 'ROI Puerta', (x1, y1-10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # Dibujar línea de cruce central solo si está habilitado
+        if self.config.get('mostrar_linea_cruce', True):
+            linea_x = self.config['linea_cruce']
+            cv2.line(frame_anotado, (linea_x, 0), (linea_x, frame.shape[0]), (255, 0, 0), 2)
         
-        # Dibujar línea de cruce
-        linea_x = self.config['linea_cruce']
-        cv2.line(frame_anotado, (linea_x, 0), (linea_x, frame.shape[0]), (255, 0, 0), 3)
-        cv2.putText(frame_anotado, 'Línea Cruce', (linea_x+10, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-        
-        # Dibujar banda de cruce
-        ancho_banda = self.config['ancho_banda_cruce']
-        cv2.line(frame_anotado, (linea_x - ancho_banda, 0), (linea_x - ancho_banda, frame.shape[0]), (0, 255, 255), 1)
-        cv2.line(frame_anotado, (linea_x + ancho_banda, 0), (linea_x + ancho_banda, frame.shape[0]), (0, 255, 255), 1)
-        
-        # Dibujar solo puntos en el centro de las personas detectadas
-        for deteccion in detecciones:
-            centro_x, centro_y = deteccion.centro
-            confianza = deteccion.confianza
-            
-            # Color basado en confianza
-            if confianza > self.config.get('umbral_confianza_alto', 0.6):
-                color = (0, 255, 0)  # Verde
-            elif confianza > self.config.get('umbral_confianza_medio', 0.4):
-                color = (0, 255, 255)  # Amarillo
-            else:
-                color = (0, 0, 255)  # Rojo
-            
-            # Dibujar punto en el centro
-            cv2.circle(frame_anotado, (centro_x, centro_y), 6, color, -1)
-            cv2.circle(frame_anotado, (centro_x, centro_y), 8, (255, 255, 255), 2)
-            
-            # Mostrar ID del track si está disponible
-            for track_id, track in personas_actuales.items():
-                if track.ultima_posicion and abs(track.ultima_posicion[0] - centro_x) < 10 and abs(track.ultima_posicion[1] - centro_y) < 10:
-                    # Dibujar ID del track
-                    cv2.putText(frame_anotado, f'ID:{track_id}', 
-                               (centro_x+10, centro_y-10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    break
-        
-        # Dibujar contadores y métricas
-        self.dibujar_contadores(frame_anotado)
-        self.dibujar_metricas(frame_anotado)
+        # Dibujar solo puntos en el centro de las personas detectadas (opcional para depuración)
+        if self.config.get('mostrar_puntos_personas', False):
+            for deteccion in detecciones:
+                centro_x, centro_y = deteccion.centro
+                # Punto simple sin texto para optimizar rendimiento
+                cv2.circle(frame_anotado, (centro_x, centro_y), 4, (0, 255, 0), -1)
         
         return frame_anotado
     
-    def dibujar_contadores(self, frame):
-        """Dibuja los contadores en el frame"""
-        # Fondo para contadores
-        cv2.rectangle(frame, (10, 10), (300, 120), (0, 0, 0), -1)
-        cv2.rectangle(frame, (10, 10), (300, 120), (255, 255, 255), 2)
-        
-        # Contadores
-        cv2.putText(frame, f'Entradas: {self.tracker.contador_entradas}', (20, 35), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f'Salidas: {self.tracker.contador_salidas}', (20, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(frame, f'En Habitacion: {self.tracker.personas_en_habitacion}', (20, 85), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        cv2.putText(frame, f'Tracks: {len(self.tracker.tracks)}', (20, 110), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    # Función dibujar_contadores eliminada para optimizar rendimiento
     
     def dibujar_metricas(self, frame):
         """Dibuja las métricas del sistema en el frame"""
@@ -992,32 +964,50 @@ class ServidorStreaming:
                     <button onclick="location.reload()">🔄 Recargar</button>
                     <button onclick="window.open('/metrics', '_blank')">📊 Ver Métricas JSON</button>
                     <button onclick="window.open('/counts', '_blank')">🔢 Ver Contadores</button>
+                    <button onclick="togglePuntosPersonas()">👁️ Toggle Puntos Personas</button>
+                    <button onclick="toggleLineaCruce()">📏 Toggle Línea Cruce</button>
                 </div>
                 
                 <div class="metrics">
                     <div class="metric-card">
                         <div class="metric-value" id="entradas">-</div>
-                        <div class="metric-label">Entradas</div>
+                        <div class="metric-label">🚪 Entradas</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value" id="salidas">-</div>
-                        <div class="metric-label">Salidas</div>
+                        <div class="metric-label">🚪 Salidas</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value" id="en_habitacion">-</div>
-                        <div class="metric-label">En Habitación</div>
+                        <div class="metric-label">👥 En Habitación</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-value" id="fps">-</div>
-                        <div class="metric-label">FPS</div>
+                        <div class="metric-value" id="tracks">-</div>
+                        <div class="metric-label">🆔 Tracks Activos</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value" id="fps_captura">-</div>
+                        <div class="metric-label">📹 FPS Captura</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value" id="fps_inferencia">-</div>
+                        <div class="metric-label">🧠 FPS Inferencia</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value" id="frames">-</div>
+                        <div class="metric-label">🎬 Frames</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value" id="cpu">-</div>
-                        <div class="metric-label">CPU %</div>
+                        <div class="metric-label">🖥️ CPU %</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value" id="memoria">-</div>
-                        <div class="metric-label">Memoria %</div>
+                        <div class="metric-label">💾 Memoria %</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value" id="temperatura">-</div>
+                        <div class="metric-label">🌡️ Temperatura</div>
                     </div>
                 </div>
             </div>
@@ -1031,9 +1021,13 @@ class ServidorStreaming:
                             document.getElementById('entradas').textContent = data.contador_entradas;
                             document.getElementById('salidas').textContent = data.contador_salidas;
                             document.getElementById('en_habitacion').textContent = data.personas_en_habitacion;
-                            document.getElementById('fps').textContent = data.fps_captura.toFixed(1);
+                            document.getElementById('tracks').textContent = data.tracks_activos;
+                            document.getElementById('fps_captura').textContent = data.fps_captura.toFixed(1);
+                            document.getElementById('fps_inferencia').textContent = data.fps_inferencia.toFixed(1);
+                            document.getElementById('frames').textContent = data.frame_count;
                             document.getElementById('cpu').textContent = data.cpu.toFixed(1);
                             document.getElementById('memoria').textContent = data.memoria.toFixed(1);
+                            document.getElementById('temperatura').textContent = data.temperatura ? data.temperatura.toFixed(1) + '°C' : 'N/A';
                         })
                         .catch(error => console.error('Error:', error));
                 }
@@ -1043,6 +1037,25 @@ class ServidorStreaming:
                 
                 // Actualizar al cargar la página
                 actualizarMetricas();
+                
+                // Funciones para controlar visualizaciones
+                function togglePuntosPersonas() {
+                    fetch('/toggle_puntos_personas', {method: 'POST'})
+                        .then(response => response.json())
+                        .then(data => {
+                            console.log('Puntos personas:', data.mostrar_puntos_personas ? 'Activados' : 'Desactivados');
+                        })
+                        .catch(error => console.error('Error:', error));
+                }
+                
+                function toggleLineaCruce() {
+                    fetch('/toggle_linea_cruce', {method: 'POST'})
+                        .then(response => response.json())
+                        .then(data => {
+                            console.log('Línea cruce:', data.mostrar_linea_cruce ? 'Activada' : 'Desactivada');
+                        })
+                        .catch(error => console.error('Error:', error));
+                }
             </script>
         </body>
         </html>
@@ -1076,28 +1089,32 @@ class ServidorStreaming:
 
 def main():
     """Función principal"""
-    # Configuración por defecto
+    # Configuración por defecto optimizada
     config = {
         'resolucion': [640, 480],
-        'fps_objetivo': 25,
+        'fps_objetivo': 30,
         'confianza_minima': 0.4,
         'area_minima': 2000,
-        'roi_puerta': [80, 80, 560, 420],
+        'roi_puerta': [80, 80, 560, 400],
         'linea_cruce': 320,
         'ancho_banda_cruce': 3,
         'debounce_ms': 300,
         'track_lost_ms': 700,
         'exposure_us': 4000,
         'gain': 1.0,
-        'distancia_maxima_tracking': 100,
-        'historial_maxlen': 30,
-        'umbral_movimiento': 20,
-        'nms_iou': 0.5, # Nuevo parámetro para NMS
-        'procesar_cada_n_frames': 3, # Nuevo parámetro para procesar cada N frames
-        'filtro_estabilidad': True, # Nuevo parámetro para habilitar filtro de estabilidad
-        'tiempo_persistencia_ms': 3000, # Nuevo parámetro para tiempo de persistencia
-        'umbral_confianza_alto': 0.7, # Nuevo parámetro para confianza alta
-        'umbral_confianza_medio': 0.4 # Nuevo parámetro para confianza media
+        'distancia_maxima_tracking': 80,
+        'historial_maxlen': 20,
+        'umbral_movimiento': 15,
+        'nms_iou': 0.45,
+        'procesar_cada_n_frames': 1,
+        'filtro_estabilidad': True,
+        'tiempo_persistencia_ms': 2000,
+        'umbral_confianza_alto': 0.6,
+        'umbral_confianza_medio': 0.4,
+        'mostrar_puntos_personas': False,
+        'mostrar_linea_cruce': True,
+        'calidad_jpeg': 75,
+        'log_reducido': True
     }
     
     # Cargar configuración si existe
