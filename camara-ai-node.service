@@ -1,0 +1,26 @@
+[Unit]
+Description=Cámara AI Servicio Node.js
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root111
+WorkingDirectory=/home/root111/camara_1
+ExecStart=/usr/bin/node servicio_camara_node.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Configuración de recursos
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Configuración de seguridad simplificada
+
+[Install]
+WantedBy=multi-user.target 
