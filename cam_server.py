@@ -180,8 +180,14 @@ class ProcesadorSegundoPlano:
             try:
                 frame_counter += 1
                 
-                # Por ahora, usar detecciones sintéticas para probar el sistema
-                detecciones = self.generar_detecciones_sinteticas(frame_counter)
+                # Ejecutar inferencias AI reales
+                detecciones = self.ejecutar_inferencia_ai(frame_counter)
+                
+                # Si las inferencias AI no funcionan, usar detección básica
+                if not detecciones:
+                    detecciones = self.deteccion_basica_fallback()
+                    if detecciones:
+                        print(f"🔄 Frame {frame_counter}: {len(detecciones)} objetos detectados (detección básica)")
                 
                 if detecciones:
                     # Encolar detecciones para procesamiento
@@ -191,7 +197,9 @@ class ProcesadorSegundoPlano:
                             'timestamp': time.time()
                         })
                     
-                    print(f"🎯 Frame {frame_counter}: {len(detecciones)} personas detectadas (sintéticas)")
+                    print(f"🎯 Frame {frame_counter}: {len(detecciones)} objetos detectados")
+                else:
+                    print(f"🔄 Frame {frame_counter}: Sin detecciones")
                 
                 # Actualizar métricas de inferencia
                 timestamp = time.time()
