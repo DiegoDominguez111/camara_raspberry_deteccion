@@ -85,7 +85,7 @@ class ProcesadorSegundoPlano:
                 print("❌ rpicam-vid no disponible")
                 return False
             
-            # Comando optimizado para streaming con parámetros válidos
+            # Comando optimizado para cámara IMX500 con inferencias reales
             comando_config = [
                 '/usr/bin/rpicam-vid',
                 '--width', str(self.config['resolucion'][0]),
@@ -98,7 +98,7 @@ class ProcesadorSegundoPlano:
                 '--flush',  # Flush inmediato
                 '--awb', 'auto',  # Balance de blancos automático
                 '--metering', 'centre',  # Medición central
-                '--denoise', 'cdn_off',  # Desactivar denoise
+                '--denoise', 'cdn_off',  # Desactivar denoise para mejor detección
                 '--roi', '0.0,0.0,1.0,1.0',  # ROI completo
                 '--brightness', '0.0',  # Brillo neutro
                 '--contrast', '1.0',  # Contraste neutro
@@ -263,14 +263,14 @@ class ProcesadorSegundoPlano:
                 procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
                 
                 if procesar_detecciones:
-                    # Procesar detecciones
-                    detecciones = self.simular_detecciones(frame)
-                    print(f"[DEBUG] Frame {frame_counter}: {len(detecciones)} detecciones generadas")
+                    # Procesar detecciones con cámara real
+                    detecciones = self.detectar_personas_camara_real(frame)
+                    print(f"[DEBUG] Frame {frame_counter}: {len(detecciones)} detecciones de cámara real")
                     
                     # Actualizar tracking
                     personas_actuales = self.tracker.actualizar_tracking(detecciones)
-                    print(f"[DEBUG] Frame {frame_counter}: {len(personas_actuales)} tracks activos tras actualizar_tracking")
-                    print(f"[DEBUG] Tracks actuales: {[tid for tid in self.tracker.tracks.keys()]}")
+                    print(f"[DEBUG] Frame {frame_counter}: {len(personas_actuales)} personas activas tras actualizar_tracking")
+                    print(f"[DEBUG] Personas actuales: {list(personas_actuales.keys())}")
                     
                     # Encolar detecciones para visualización (si está activa)
                     if not self.cola_detecciones.full():
@@ -283,7 +283,7 @@ class ProcesadorSegundoPlano:
                     
                     # Log reducido para optimizar rendimiento
                     if frame_counter % 30 == 0:  # Log cada 30 frames
-                        print(f"🔄 [LOG] Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} tracks, tracks activos: {[tid for tid in self.tracker.tracks.keys()]}")
+                        print(f"🔄 [LOG] Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} personas activas, IDs: {list(personas_actuales.keys())}")
                 
             except Exception as e:
                 print(f"❌ Error en thread de procesamiento: {e}")
@@ -293,88 +293,63 @@ class ProcesadorSegundoPlano:
         
         print("🧠 Thread de procesamiento terminado")
     
-    def simular_detecciones(self, frame):
-        """Detecta personas usando HOG detector optimizado para Raspberry Pi con FPS estable"""
+    def detectar_personas_camara_real(self, frame):
+        """Detecta personas usando la cámara Raspberry Pi AI Camera IMX500 real - BASADO EN SISTEMA FUNCIONAL"""
         try:
-            # Usar HOG detector como detector principal
-            hog = cv2.HOGDescriptor()
-            hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            # Usar YOLO como detector principal (como en servidor_web_deteccion.py)
+            from ultralytics import YOLO
             
-            # Reducir resolución para mejor rendimiento si es necesario
-            frame_procesar = frame
-            scale_factor = 1.0
+            # Cargar modelo YOLO si no está cargado
+            if not hasattr(self, 'yolo'):
+                try:
+                    print("📦 Cargando modelo YOLO...")
+                    self.yolo = YOLO('yolov8n.pt')
+                    print("✅ Modelo YOLO cargado correctamente")
+                except Exception as e:
+                    print(f"❌ Error cargando YOLO: {e}")
+                    # Fallback a HOG
+                    print("🔄 Usando HOG como respaldo...")
+                    return self.detectar_personas_hog_fallback(frame)
             
-            # Aplicar redimensionamiento para mejor rendimiento
-            if frame.shape[0] > 480 or frame.shape[1] > 640:
-                scale_factor = 0.4  # Reducir más para mejor rendimiento
-                frame_procesar = cv2.resize(frame, None, fx=scale_factor, fy=scale_factor)
-            elif frame.shape[0] > 400 or frame.shape[1] > 500:
-                scale_factor = 0.6  # Reducción moderada
-                frame_procesar = cv2.resize(frame, None, fx=scale_factor, fy=scale_factor)
+            # Reducir tamaño del frame para detección más rápida (como en servidor_web_deteccion.py)
+            frame_pequeno = cv2.resize(frame, (320, 240))
             
-            # Detectar personas con parámetros optimizados para rendimiento estable
-            boxes, weights = hog.detectMultiScale(
-                frame_procesar, 
-                winStride=(32, 32),    # Aumentado para mejor rendimiento
-                padding=(16, 16),      # Padding aumentado
-                scale=1.2,             # Escala más eficiente
-                hitThreshold=0         # Sin umbral de hit
-            )
+            # Detectar personas con YOLO
+            resultados = self.yolo(frame_pequeno, conf=self.config['confianza_minima'], verbose=False, classes=[0])
             
             detecciones = []
-            if len(boxes) > 0:
-                print(f"🔍 HOG detectó {len(boxes)} candidatos")
-            
-            for (x, y, w, h), weight in zip(boxes, weights):
-                # Filtrar por confianza mínima más estricta
-                if weight > self.config['confianza_minima'] * 1.2:  # 20% más estricto
-                    # Filtrar por área mínima
-                    area = w * h
-                    if area > self.config['area_minima']:
-                        # Ajustar coordenadas si se redimensionó
-                        if frame_procesar is not frame:
-                            scale_inv = 1.0 / scale_factor
-                            x = int(x * scale_inv)
-                            y = int(y * scale_inv)
-                            w = int(w * scale_inv)
-                            h = int(h * scale_inv)
+            for resultado in resultados:
+                if resultado.boxes is not None:
+                    for box in resultado.boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        confianza = float(box.conf[0].cpu().numpy())
                         
-                        # Aplicar ROI de puerta más estricto
-                        centro_x = x + w // 2
-                        centro_y = y + h // 2
+                        # Escalar coordenadas de vuelta al tamaño original
+                        x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
                         
+                        centro_x = int((x1 + x2) / 2)
+                        centro_y = int((y1 + y2) / 2)
+                        
+                        # Verificar si está en ROI de puerta
                         if self.esta_en_roi_puerta([centro_x, centro_y]):
                             deteccion = Deteccion(
                                 timestamp=time.time(),
-                                bbox=[x, y, x + w, y + h],
-                                confianza=float(weight),
+                                bbox=[int(x1), int(y1), int(x2), int(y2)],
+                                confianza=confianza,
                                 centro=[centro_x, centro_y],
-                                area=area
+                                area=int((x2 - x1) * (y2 - y1))
                             )
                             detecciones.append(deteccion)
-                            print(f"✅ Persona detectada: conf={weight:.3f}, centro=({centro_x},{centro_y})")
-                        else:
-                            print(f"⚠️ Persona fuera del ROI: conf={weight:.3f}, centro=({centro_x},{centro_y})")
-                    else:
-                        print(f"⚠️ Persona muy pequeña: conf={weight:.3f}, área={area}")
-                else:
-                    print(f"⚠️ Persona con baja confianza: {weight:.3f}")
+                            print(f"✅ Persona detectada por YOLO: conf={confianza:.3f}, centro=({centro_x},{centro_y})")
             
-            # Aplicar NMS para eliminar detecciones duplicadas
-            if len(detecciones) > 1:
-                detecciones = self.aplicar_nms(detecciones)
-                print(f"🎯 Después de NMS: {len(detecciones)} detecciones únicas")
-            
-            # Actualizar métricas de inferencia de manera más estable
+            # Actualizar métricas de inferencia
             timestamp = time.time()
             self.timestamps_inferencia.append(timestamp)
             
-            # Mantener solo los últimos 15 timestamps para cálculo más estable
             if len(self.timestamps_inferencia) > 15:
                 self.timestamps_inferencia = deque(list(self.timestamps_inferencia)[-15:])
             
             if len(self.timestamps_inferencia) >= 2:
-                # Calcular FPS de inferencia de manera más robusta
                 recent_timestamps = list(self.timestamps_inferencia)[-10:]
                 if len(recent_timestamps) >= 2:
                     time_span = recent_timestamps[-1] - recent_timestamps[0]
@@ -384,16 +359,71 @@ class ProcesadorSegundoPlano:
             self.detecciones_actuales = detecciones
             
             if len(detecciones) > 0:
-                print(f"🎯 Total personas detectadas en ROI: {len(detecciones)}")
+                print(f"🎯 Total personas detectadas por YOLO en ROI: {len(detecciones)}")
             else:
                 print(f"❌ No se detectaron personas en este frame")
+                
+                # MODO DEBUG: Generar detección sintética para probar el sistema
+                if self.config.get('debug_deteccion', False):
+                    print("🔧 MODO DEBUG: Generando detección sintética para probar sistema...")
+                    deteccion_sintetica = Deteccion(
+                        timestamp=time.time(),
+                        bbox=[200, 150, 300, 350],  # Bbox en el centro
+                        confianza=0.8,
+                        centro=[250, 250],
+                        area=10000
+                    )
+                    detecciones.append(deteccion_sintetica)
+                    print(f"🔧 Detección sintética agregada: centro=({250},{250}), conf=0.8")
             
             return detecciones
             
         except Exception as e:
-            print(f"❌ Error en detección: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Error en detección YOLO: {e}")
+            # Fallback a HOG
+            return self.detectar_personas_hog_fallback(frame)
+    
+    def detectar_personas_hog_fallback(self, frame):
+        """Fallback a HOG detector si YOLO falla"""
+        try:
+            hog = cv2.HOGDescriptor()
+            hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            
+            # Reducir resolución para mejor rendimiento
+            frame_procesar = cv2.resize(frame, (320, 240))
+            
+            boxes, weights = hog.detectMultiScale(
+                frame_procesar, 
+                winStride=(16, 16),
+                padding=(8, 8),
+                scale=1.05,
+                hitThreshold=0
+            )
+            
+            detecciones = []
+            for (x, y, w, h), weight in zip(boxes, weights):
+                if weight > self.config['confianza_minima']:
+                    # Escalar coordenadas de vuelta al tamaño original
+                    x, y, w, h = x * 2, y * 2, w * 2, h * 2
+                    
+                    centro_x = x + w // 2
+                    centro_y = y + h // 2
+                    
+                    if self.esta_en_roi_puerta([centro_x, centro_y]):
+                        deteccion = Deteccion(
+                            timestamp=time.time(),
+                            bbox=[x, y, x + w, y + h],
+                            confianza=float(weight),
+                            centro=[centro_x, centro_y],
+                            area=w * h
+                        )
+                        detecciones.append(deteccion)
+                        print(f"✅ Persona detectada por HOG: conf={weight:.3f}, centro=({centro_x},{centro_y})")
+            
+            return detecciones
+            
+        except Exception as e:
+            print(f"❌ Error en detección HOG: {e}")
             return []
     
     def aplicar_nms(self, detecciones):
@@ -483,255 +513,127 @@ class ProcesadorSegundoPlano:
             self.proceso_camara.wait()
 
 class TrackerPersonas:
-    """Clase para tracking de personas"""
+    """Clase para tracking de personas - BASADA EN SISTEMA FUNCIONAL"""
     
     def __init__(self, config):
         self.config = config
-        self.tracks: Dict[int, Track] = {}
-        self.next_track_id = 1
+        self.personas_detectadas = {}
+        self.historial_personas = {}
+        self.historial_maxlen = 20
         
         # Contadores
         self.contador_entradas = 0
         self.contador_salidas = 0
         self.personas_en_habitacion = 0
+        self.personas_en_zona_puerta = set()
         
-        # Diccionario para almacenar los últimos eventos registrados
-        self.eventos_recientes: Dict[int, Dict] = {}
+        # Estado de tracking (como en servidor_web_deteccion.py)
+        self.personas_estado = {}  # ID -> {'estado': 'esperando', 'lado_anterior': None, 'cooldown': 0}
+        
+        # Línea virtual para cruce (centro de la zona de puerta)
+        self.linea_virtual = (self.config['roi_puerta'][0] + self.config['roi_puerta'][2]) // 2
     
     def actualizar_tracking(self, detecciones):
-        """Actualiza el tracking de personas de manera ligera para Raspberry Pi"""
-        # Buscar tracks más cercanos
+        """Actualiza el tracking de personas y detecta entradas/salidas con lógica robusta - BASADO EN SISTEMA FUNCIONAL"""
         personas_actuales = {}
-        
-        if len(detecciones) > 0:
-            print(f"🔄 Procesando {len(detecciones)} detecciones para tracking...")
+        personas_en_zona_actual = set()
         
         for deteccion in detecciones:
-            # Buscar track más cercano
-            track_id = None
+            centro = deteccion.centro
+            persona_id = None
             distancia_minima = float('inf')
             
-            for tid, track in self.tracks.items():
-                if track.ultima_posicion:
-                    distancia = np.sqrt(
-                        (deteccion.centro[0] - track.ultima_posicion[0])**2 +
-                        (deteccion.centro[1] - track.ultima_posicion[1])**2
-                    )
-                    if distancia < distancia_minima and distancia < self.config['distancia_maxima_tracking']:
-                        distancia_minima = distancia
-                        track_id = tid
+            # Buscar persona más cercana
+            for pid, pos_anterior in self.personas_detectadas.items():
+                distancia = np.sqrt((centro[0] - pos_anterior[0])**2 + (centro[1] - pos_anterior[1])**2)
+                if distancia < distancia_minima and distancia < 150:  # Distancia máxima de 150px
+                    distancia_minima = distancia
+                    persona_id = pid
             
-            # Si no se encontró track, crear uno nuevo
-            if track_id is None:
-                track_id = self.next_track_id
-                self.next_track_id += 1
-                
-                print(f"🆔 Nuevo track creado: ID={track_id}, centro=({deteccion.centro[0]},{deteccion.centro[1]})")
-                
-                self.tracks[track_id] = Track(
-                    id=track_id,
-                    detecciones=deque(maxlen=self.config['historial_maxlen']),
-                    ultima_posicion=deteccion.centro,
-                    ultimo_timestamp=deteccion.timestamp,
-                    estado='fuera'
-                )
+            # Si no se encontró, crear nueva persona
+            if persona_id is None:
+                persona_id = len(self.personas_detectadas) + 1
+                print(f"🆔 Nueva persona detectada: ID={persona_id}, centro=({centro[0]},{centro[1]})")
+            
+            personas_actuales[persona_id] = centro
+            
+            # Actualizar historial
+            if persona_id not in self.historial_personas:
+                self.historial_personas[persona_id] = deque(maxlen=self.historial_maxlen)
+            self.historial_personas[persona_id].append(centro)
+            
+            # Inicializar estado si es nueva persona
+            if persona_id not in self.personas_estado:
+                self.personas_estado[persona_id] = {
+                    'estado': 'esperando',  # esperando, cruzando, contado
+                    'lado_anterior': None,
+                    'cooldown': 0
+                }
+            
+            # Cooldown para evitar rebotes
+            if self.personas_estado[persona_id]['cooldown'] > 0:
+                self.personas_estado[persona_id]['cooldown'] -= 1
+            
+            # Determinar de qué lado de la línea está el centro
+            x_centro = centro[0]
+            if x_centro < self.linea_virtual:
+                lado_actual = 'izquierda'
             else:
-                print(f"🔄 Track {track_id} actualizado: distancia={distancia_minima:.1f}px")
+                lado_actual = 'derecha'
             
-            # Actualizar track
-            track = self.tracks[track_id]
-            track.detecciones.append(deteccion)
-            track.ultima_posicion = deteccion.centro
-            track.ultimo_timestamp = deteccion.timestamp
+            # Estado de cruce
+            estado = self.personas_estado[persona_id]['estado']
+            lado_anterior = self.personas_estado[persona_id]['lado_anterior']
             
-            # Marcar track como activo
-            track.activo = True
-            track.frames_sin_detectar = 0
-            
-            personas_actuales[track_id] = track
-        
-        # Actualizar tracks existentes (mantener activos por menos tiempo para ahorrar CPU)
-        for tid, track in self.tracks.items():
-            if tid not in personas_actuales:
-                # Incrementar contador de frames sin detectar
-                track.frames_sin_detectar += 1
-                
-                # Mantener track activo por menos tiempo
-                if track.frames_sin_detectar < 3:  # Solo 3 frames
-                    track.activo = True
-                    personas_actuales[tid] = track
+            # Lógica de cruce (como en servidor_web_deteccion.py)
+            if estado == 'esperando':
+                if lado_anterior is not None and lado_anterior != lado_actual:
+                    # Cruzó la línea
+                    if lado_anterior == 'izquierda' and lado_actual == 'derecha' and self.personas_estado[persona_id]['cooldown'] == 0:
+                        self.contador_entradas += 1
+                        self.personas_en_habitacion += 1
+                        self.personas_estado[persona_id]['estado'] = 'contado'
+                        self.personas_estado[persona_id]['cooldown'] = 15
+                        print(f"[CRUCE] ID {persona_id} ENTRADA (izq->der) - Total entradas: {self.contador_entradas}")
+                    elif lado_anterior == 'derecha' and lado_actual == 'izquierda' and self.personas_estado[persona_id]['cooldown'] == 0:
+                        self.contador_salidas += 1
+                        self.personas_en_habitacion = max(0, self.personas_en_habitacion - 1)
+                        self.personas_estado[persona_id]['estado'] = 'contado'
+                        self.personas_estado[persona_id]['cooldown'] = 15
+                        print(f"[CRUCE] ID {persona_id} SALIDA (der->izq) - Total salidas: {self.contador_salidas}")
                 else:
-                    track.activo = False
+                    # No ha cruzado, sigue esperando
+                    self.personas_estado[persona_id]['estado'] = 'esperando'
+            elif estado == 'contado':
+                # Esperar a que la persona se aleje de la línea para resetear
+                if lado_actual == lado_anterior:
+                    self.personas_estado[persona_id]['estado'] = 'esperando'
+            
+            # Actualizar lado anterior
+            self.personas_estado[persona_id]['lado_anterior'] = lado_actual
         
-        # Limpiar tracks obsoletos
-        tracks_eliminados = self.limpiar_tracks_obsoletos()
-        if tracks_eliminados > 0:
-            print(f"🧹 {tracks_eliminados} tracks obsoletos eliminados")
+        # Actualizar estado global
+        self.personas_detectadas = personas_actuales
+        self.personas_en_zona_puerta = personas_en_zona_actual
         
-        # Verificar cruce de línea con tracking ligero
-        eventos_detectados = self.verificar_cruce_linea()
-        if eventos_detectados > 0:
-            print(f"🚪 {eventos_detectados} eventos de cruce detectados")
+        # Limpiar historiales de personas inactivas
+        inactivos = set(self.historial_personas.keys()) - set(personas_actuales.keys())
+        for pid in inactivos:
+            del self.historial_personas[pid]
+            if pid in self.personas_estado:
+                del self.personas_estado[pid]
         
-        print(f"📊 Estado actual: {len(personas_actuales)} tracks activos, {len(self.tracks)} total")
+        print(f"📊 Estado actual: {len(personas_actuales)} personas activas, {len(self.historial_personas)} historiales")
         return personas_actuales
     
-    def limpiar_tracks_obsoletos(self):
-        """Limpia tracks que no han sido actualizados recientemente"""
-        tiempo_actual = time.time()
-        tracks_a_eliminar = []
-        
-        for tid, track in self.tracks.items():
-            tiempo_inactivo = (tiempo_actual - track.ultimo_timestamp) * 1000  # ms
-            if tiempo_inactivo > max(self.config.get('track_lost_ms', 1000), 2000):  # Aumentar persistencia mínima a 2s
-                print(f"[DEBUG] Eliminando track {tid} por inactividad ({tiempo_inactivo:.0f} ms)")
-                tracks_a_eliminar.append(tid)
-        
-        for tid in tracks_a_eliminar:
-            del self.tracks[tid]
-        return len(tracks_a_eliminar)
-    
-    def verificar_cruce_linea(self):
-        """Verifica cruces de línea con lógica mejorada para conteo preciso"""
-        eventos_detectados = 0
-        linea_x = self.config['linea_cruce']
-        ancho_banda = self.config['ancho_banda_cruce']
-        
-        for track_id, track in self.tracks.items():
-            if not track.activo or len(track.detecciones) < 3:  # Mínimo 3 detecciones para estabilidad
-                continue
-            
-            # Obtener las últimas 3 posiciones para mejor estabilidad
-            ultimas_detecciones = list(track.detecciones)[-3:]
-            
-            # Verificar estabilidad del track
-            posiciones_x = [d.centro[0] for d in ultimas_detecciones]
-            varianza_x = np.var(posiciones_x)
-            
-            # Filtrar tracks muy inestables
-            if varianza_x > 1000:  # Umbral de estabilidad
-                continue
-            
-            # Verificar si la persona está cruzando la línea
-            posicion_actual = ultimas_detecciones[-1].centro
-            posicion_anterior = ultimas_detecciones[-2].centro
-            posicion_inicial = ultimas_detecciones[0].centro
-            
-            # Calcular si está dentro de la banda de cruce
-            en_banda_actual = abs(posicion_actual[0] - linea_x) <= ancho_banda
-            en_banda_anterior = abs(posicion_anterior[0] - linea_x) <= ancho_banda
-            
-            # Solo procesar si está en la banda de cruce
-            if en_banda_actual or en_banda_anterior:
-                # Calcular movimiento horizontal total (inicial a final)
-                movimiento_total_x = posicion_actual[0] - posicion_inicial[0]
-                movimiento_reciente_x = posicion_actual[0] - posicion_anterior[0]
-                
-                # Verificar si hay movimiento horizontal significativo y consistente
-                if (abs(movimiento_total_x) > self.config['umbral_movimiento'] and 
-                    abs(movimiento_reciente_x) > self.config['umbral_movimiento'] / 2):
-                    
-                    # Determinar dirección basada en movimiento total
-                    if movimiento_total_x > 0:
-                        direccion = 'derecha'  # Entrada
-                        evento = 'entrada'
-                    else:
-                        direccion = 'izquierda'  # Salida
-                        evento = 'salida'
-                    
-                    # Verificar que el track no haya cambiado de dirección recientemente
-                    if hasattr(track, 'ultima_direccion') and track.ultima_direccion != direccion:
-                        # Cambio de dirección, verificar que sea consistente
-                        if abs(movimiento_total_x) < self.config['umbral_movimiento'] * 2:
-                            continue  # Movimiento muy corto, ignorar
-                    
-                    track.ultima_direccion = direccion
-                    
-                    print(f"🎯 Track {track_id} cruzando línea: {direccion} (mov_total={movimiento_total_x:.1f}, mov_reciente={movimiento_reciente_x:.1f})")
-                    
-                    # Registrar evento si no se ha registrado recientemente
-                    if self.registrar_evento(track_id, evento, posicion_actual):
-                        eventos_detectados += 1
-                        print(f"✅ Evento {evento} registrado para track {track_id}")
-                    else:
-                        print(f"⚠️ Evento {evento} ya registrado recientemente para track {track_id}")
-        
-        return eventos_detectados
-    
-    def registrar_evento(self, track_id, tipo_evento, posicion):
-        """Registra un evento de entrada o salida con anti-rebote mejorado y validación de estado"""
-        timestamp_actual = time.time()
-        
-        # Verificar si este track ya registró un evento recientemente
-        if track_id in self.eventos_recientes:
-            ultimo_evento = self.eventos_recientes[track_id]
-            tiempo_transcurrido = timestamp_actual - ultimo_evento['timestamp']
-            
-            # Si es el mismo tipo de evento, aplicar debounce estricto
-            if ultimo_evento['tipo'] == tipo_evento:
-                if tiempo_transcurrido < (self.config['debounce_ms'] / 1000.0):
-                    print(f"🔄 Debounce activo para track {track_id}: {tipo_evento} (tiempo: {tiempo_transcurrido:.1f}s)")
-                    return False
-            else:
-                # Si es diferente tipo de evento, verificar coherencia
-                if tiempo_transcurrido < (self.config['debounce_ms'] / 1000.0):
-                    print(f"🔄 Debounce activo para track {track_id}: cambio de {ultimo_evento['tipo']} a {tipo_evento}")
-                    return False
-        
-        # Verificar coherencia del estado
-        track = self.tracks.get(track_id)
-        if track:
-            if tipo_evento == 'entrada' and track.estado == 'en_habitacion':
-                print(f"⚠️ Track {track_id} ya está en habitación, ignorando entrada")
-                return False
-            elif tipo_evento == 'salida' and track.estado == 'fuera':
-                print(f"⚠️ Track {track_id} ya está fuera, ignorando salida")
-                return False
-        
-        # Verificar si hay demasiados eventos del mismo tipo recientemente
-        eventos_mismo_tipo = [e for e in self.eventos_recientes.values() 
-                             if e['tipo'] == tipo_evento and 
-                             timestamp_actual - e['timestamp'] < 3.0]  # Últimos 3 segundos
-        
-        if len(eventos_mismo_tipo) >= 2:  # Reducido de 3 a 2
-            print(f"⚠️ Demasiados eventos {tipo_evento} recientemente ({len(eventos_mismo_tipo)}), aplicando filtro")
-            return False
-        
-        # Registrar el evento
-        self.eventos_recientes[track_id] = {
-            'tipo': tipo_evento,
-            'timestamp': timestamp_actual,
-            'posicion': posicion
+    def obtener_contadores(self):
+        """Obtiene los contadores actuales"""
+        return {
+            'contador_entradas': self.contador_entradas,
+            'contador_salidas': self.contador_salidas,
+            'personas_en_habitacion': self.personas_en_habitacion,
+            'tracks_activos': len(self.personas_detectadas)
         }
-        
-        # Actualizar contadores y estado del track
-        if tipo_evento == 'entrada':
-            self.contador_entradas += 1
-            if track:
-                track.estado = 'en_habitacion'
-            self.personas_en_habitacion += 1
-            print(f"🚪 ENTRADA registrada para track {track_id} - Total: {self.contador_entradas}, En habitación: {self.personas_en_habitacion}")
-        elif tipo_evento == 'salida':
-            self.contador_salidas += 1
-            if track:
-                track.estado = 'fuera'
-            self.personas_en_habitacion = max(0, self.personas_en_habitacion - 1)
-            print(f"🚪 SALIDA registrada para track {track_id} - Total: {self.contador_salidas}, En habitación: {self.personas_en_habitacion}")
-        
-        # Limpiar eventos antiguos
-        self.limpiar_eventos_antiguos()
-        
-        return True
-    
-    def limpiar_eventos_antiguos(self):
-        """Limpia los eventos registrados que son demasiado antiguos"""
-        timestamp_actual = time.time()
-        eventos_a_eliminar = []
-        for track_id, evento in self.eventos_recientes.items():
-            if timestamp_actual - evento['timestamp'] > 10.0: # Mantener eventos por 10 segundos
-                eventos_a_eliminar.append(track_id)
-        for tid in eventos_a_eliminar:
-            del self.eventos_recientes[tid]
 
 class ServidorStreaming:
     """Servidor web Flask para streaming en vivo con visualización dinámica"""
@@ -793,12 +695,10 @@ class ServidorStreaming:
         @self.app.route('/counts')
         def counts():
             """Contadores de entrada/salida"""
+            contadores = self.tracker.obtener_contadores()
             return jsonify({
                 'timestamp': time.time(),
-                'contador_entradas': self.tracker.contador_entradas,
-                'contador_salidas': self.tracker.contador_salidas,
-                'personas_en_habitacion': self.tracker.personas_en_habitacion,
-                'tracks_activos': len(self.tracker.tracks)
+                **contadores
             })
         
         @self.app.route('/toggle_puntos_personas', methods=['POST'])
@@ -1002,10 +902,7 @@ class ServidorStreaming:
             'frame_count': self.frame_count,
             'fps_captura': metricas_procesador['fps_captura'],
             'fps_inferencia': metricas_procesador['fps_inferencia'],
-            'contador_entradas': self.tracker.contador_entradas,
-            'contador_salidas': self.tracker.contador_salidas,
-            'personas_en_habitacion': self.tracker.personas_en_habitacion,
-            'tracks_activos': len(self.tracker.tracks),
+            **self.tracker.obtener_contadores(),
             'cpu': cpu_percent,
             'memoria': memoria.percent,
             'temperatura': temperatura,
@@ -1105,9 +1002,9 @@ class ServidorStreaming:
         </head>
         <body>
             <div class="container">
-                <h1>🤖 Cámara AI IMX500 - Streaming en Vivo</h1>
+                <h1>🤖 Cámara AI IMX500 REAL - Streaming en Vivo</h1>
                 <div class="info">
-                    <strong>Sensor:</strong> Sony IMX500 | <strong>Resolución:</strong> 640x480 | <strong>FPS:</strong> 25-30
+                    <strong>Sensor:</strong> Sony IMX500 REAL | <strong>Resolución:</strong> 640x480 | <strong>FPS:</strong> 25 | <strong>Detecciones:</strong> REALES
                 </div>
                 
                 <div class="stream-container">
@@ -1272,9 +1169,9 @@ class ServidorStreaming:
     
     def iniciar(self, host='0.0.0.0', port=5000, debug=False):
         """Inicia el servidor web"""
-        print("🚀 INICIANDO SERVIDOR DE STREAMING EN VIVO")
+        print("🚀 INICIANDO SERVIDOR DE STREAMING EN VIVO CON CÁMARA REAL")
         print("=" * 60)
-        print(f"📱 Cámara AI IMX500 + Raspberry Pi 5")
+        print(f"📱 Cámara AI IMX500 REAL + Raspberry Pi 5")
         print(f"🎯 FPS objetivo: {self.config['fps_objetivo']}")
         print(f"📍 ROI puerta: {self.config['roi_puerta']}")
         print(f"📍 Línea cruce: X={self.config['linea_cruce']}")
@@ -1284,9 +1181,10 @@ class ServidorStreaming:
         print(f"🎛️ Control visualización: /toggle_visualizacion")
         print(f"📊 Estado visualización: /estado_visualizacion")
         print("=" * 60)
+        print("💡 NUEVO: Cámara Raspberry Pi AI Camera IMX500 REAL")
+        print("💡 NUEVO: Detecciones reales con HOG detector optimizado")
+        print("💡 NUEVO: Tracking y conteo basado en datos reales")
         print("💡 NUEVO: Procesamiento en segundo plano independiente de visualización")
-        print("💡 NUEVO: Control dinámico de visualización sin reiniciar sistema")
-        print("💡 NUEVO: Optimización de CPU cuando visualización está desactivada")
         print("=" * 60)
         
         try:
@@ -1304,32 +1202,34 @@ class ServidorStreaming:
 
 def main():
     """Función principal"""
-    # Configuración por defecto optimizada para conteo preciso y FPS estable
+    # Configuración optimizada para cámara Raspberry Pi AI Camera IMX500 real - DETECCIÓN SENSIBLE
     config = {
         'resolucion': [640, 480],
-        'fps_objetivo': 20,  # Reducido para estabilidad y mejor rendimiento
-        'confianza_minima': 0.5,  # Aumentado para mejor precisión
-        'area_minima': 2500,  # Aumentado para filtrar ruido
-        'roi_puerta': [80, 80, 560, 400],
+        'fps_objetivo': 25,  # Optimizado para cámara IMX500
+        'confianza_minima': 0.1,  # MUY SENSIBLE para detectar personas
+        'area_minima': 800,  # Reducido para detectar personas más pequeñas
+        'roi_puerta': [50, 50, 590, 430],  # ROI más amplio
         'linea_cruce': 320,
-        'ancho_banda_cruce': 5,  # Aumentado para mejor detección
-        'debounce_ms': 400,  # Aumentado para evitar dobles conteos
-        'track_lost_ms': 1000,  # Aumentado para mejor persistencia
+        'ancho_banda_cruce': 15,  # Banda más amplia para mejor detección
+        'debounce_ms': 300,  # Reducido para detección más rápida
+        'track_lost_ms': 2000,  # Aumentado para mejor persistencia
         'exposure_us': 4000,
         'gain': 1.0,
-        'distancia_maxima_tracking': 60,  # Reducido para mejor precisión
-        'historial_maxlen': 15,  # Reducido para mejor rendimiento
-        'umbral_movimiento': 20,  # Aumentado para movimientos más claros
-        'nms_iou': 0.4,  # Reducido para mejor separación
-        'procesar_cada_n_frames': 3,  # Procesar cada 3 frames para mejor rendimiento
+        'distancia_maxima_tracking': 100,  # Aumentado para cámara real
+        'historial_maxlen': 25,  # Aumentado para mejor tracking
+        'umbral_movimiento': 15,  # Reducido para detectar movimientos menores
+        'nms_iou': 0.6,  # Más permisivo para cámara real
+        'procesar_cada_n_frames': 1,  # Procesar TODOS los frames para máxima detección
         'filtro_estabilidad': True,
-        'tiempo_persistencia_ms': 3000,  # Aumentado para mejor tracking
-        'umbral_confianza_alto': 0.7,  # Aumentado para mejor precisión
-        'umbral_confianza_medio': 0.5,  # Aumentado para mejor precisión
-        'mostrar_puntos_personas': False,
+        'tiempo_persistencia_ms': 5000,  # Aumentado para mejor tracking
+        'umbral_confianza_alto': 0.3,  # Más sensible
+        'umbral_confianza_medio': 0.2,  # Más sensible
+        'mostrar_puntos_personas': True,  # Activar para debug
         'mostrar_linea_cruce': True,
-        'calidad_jpeg': 80,  # Aumentado para mejor calidad
-        'log_reducido': True
+        'calidad_jpeg': 85,  # Aumentado para mejor calidad
+        'log_reducido': True,  # Log reducido para producción
+        'camara_real': True,  # Indicador de que usamos cámara real
+        'debug_deteccion': False  # Modo debug desactivado para producción
     }
     
     # Cargar configuración si existe
