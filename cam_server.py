@@ -180,14 +180,22 @@ class ProcesadorSegundoPlano:
             try:
                 frame_counter += 1
                 
-                # Ejecutar inferencias AI reales
-                detecciones = self.ejecutar_inferencia_ai(frame_counter)
+                # Sistema híbrido optimizado: procesamiento selectivo para máxima velocidad
+                detecciones = []
                 
-                # Si las inferencias AI no funcionan, usar detección básica
-                if not detecciones:
-                    detecciones = self.deteccion_basica_fallback()
-                    if detecciones:
-                        print(f"🔄 Frame {frame_counter}: {len(detecciones)} objetos detectados (detección básica)")
+                # Procesar solo cada 2 frames para mantener 15 FPS efectivos
+                if frame_counter % 2 == 0:
+                    # Ejecutar inferencias AI
+                    detecciones_ai = self.ejecutar_inferencia_ai(frame_counter)
+                    if detecciones_ai:
+                        detecciones.extend(detecciones_ai)
+                        print(f"🎯 Frame {frame_counter}: {len(detecciones_ai)} objetos detectados (AI)")
+                else:
+                    # Ejecutar solo detección básica en frames alternos
+                    detecciones_basicas = self.deteccion_basica_fallback()
+                    if detecciones_basicas:
+                        detecciones.extend(detecciones_basicas)
+                        print(f"🔄 Frame {frame_counter}: {len(detecciones_basicas)} objetos detectados (básica)")
                 
                 if detecciones:
                     # Encolar detecciones para procesamiento
@@ -197,7 +205,7 @@ class ProcesadorSegundoPlano:
                             'timestamp': time.time()
                         })
                     
-                    print(f"🎯 Frame {frame_counter}: {len(detecciones)} objetos detectados")
+                    print(f"🎯 Frame {frame_counter}: Total {len(detecciones)} objetos detectados")
                 else:
                     print(f"🔄 Frame {frame_counter}: Sin detecciones")
                 
@@ -209,14 +217,14 @@ class ProcesadorSegundoPlano:
                     self.timestamps_inferencia = deque(list(self.timestamps_inferencia)[-15:])
                 
                 if len(self.timestamps_inferencia) >= 2:
-                    recent_timestamps = list(self.timestamps_inferencia)[-10:]
+                    recent_timestamps = list(self.timestamps_inferencia)[-30:]  # Más muestras para mayor precisión
                     if len(recent_timestamps) >= 2:
                         time_span = recent_timestamps[-1] - recent_timestamps[0]
                         if time_span > 0:
                             self.fps_inferencia = (len(recent_timestamps) - 1) / time_span
                 
-                # Esperar 2 segundos antes de la siguiente inferencia
-                time.sleep(2)
+                # Esperar para mantener 15 FPS de inferencia
+                time.sleep(1.0 / 15)  # 15 FPS = ~66ms entre inferencias
                 
             except Exception as e:
                 print(f"❌ Error en thread de inferencias AI: {e}")
@@ -233,21 +241,23 @@ class ProcesadorSegundoPlano:
                 print(f"❌ Modelo AI no encontrado: {modelo_ai}")
                 return []
             
-            # Comando para inferencia AI con rpicam-still
+            # Comando optimizado para inferencia AI rápida
             comando_inferencia = [
                 '/usr/bin/rpicam-still',
-                '--width', str(self.config['resolucion'][0]),
-                '--height', str(self.config['resolucion'][1]),
+                '--width', '320',  # Resolución reducida para mayor velocidad
+                '--height', '240',  # Resolución reducida para mayor velocidad
                 '--nopreview',
-                '--output', '-',  # Salida a stdout
+                '--output', '/dev/null',  # No guardar imagen para mayor velocidad
                 '--post-process-file', modelo_ai,
-                '--metadata', '-',  # Metadatos a stdout
+                '--metadata', '-',  # Solo metadatos
                 '--metadata-format', 'json',
                 '--immediate',  # Captura inmediata
-                '--timeout', '1000',  # Timeout de 1 segundo
+                '--timeout', '300',  # Timeout mínimo para máxima velocidad
                 '--awb', 'auto',
                 '--metering', 'centre',
-                '--denoise', 'cdn_off'
+                '--denoise', 'cdn_off',
+                '--inline',  # Sin buffering
+                '--flush'  # Flush inmediato
             ]
             
             # Ejecutar inferencia AI
@@ -258,9 +268,9 @@ class ProcesadorSegundoPlano:
                 bufsize=0
             )
             
-            # Esperar a que termine (timeout de 3 segundos)
+            # Esperar a que termine (timeout mínimo para máxima velocidad)
             try:
-                stdout_data, stderr_data = proceso_inferencia.communicate(timeout=3)
+                stdout_data, stderr_data = proceso_inferencia.communicate(timeout=0.8)
             except subprocess.TimeoutExpired:
                 proceso_inferencia.kill()
                 proceso_inferencia.communicate()
@@ -346,41 +356,62 @@ class ProcesadorSegundoPlano:
                 # Convertir a escala de grises para detección básica
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
-                # Detección básica de movimiento usando diferencia de frames
+                # Detección básica de movimiento optimizada para velocidad
                 if not hasattr(self, 'frame_anterior'):
                     self.frame_anterior = gray
                     return []
                 
+                # Reducir resolución para mayor velocidad
+                gray_small = cv2.resize(gray, (160, 120))
+                frame_anterior_small = cv2.resize(self.frame_anterior, (160, 120))
+                
                 # Calcular diferencia entre frames
-                diff = cv2.absdiff(self.frame_anterior, gray)
+                diff = cv2.absdiff(frame_anterior_small, gray_small)
                 
                 # Aplicar umbral para detectar movimiento
-                _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
                 
-                # Encontrar contornos
+                # Encontrar contornos con aproximación simplificada
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
                 detecciones = []
                 
+                # Procesar solo los contornos más grandes para mayor velocidad
+                contours_filtered = []
                 for contour in contours:
-                    # Filtrar contornos pequeños
                     area = cv2.contourArea(contour)
-                    if area > 1000:  # Área mínima
-                        x, y, w, h = cv2.boundingRect(contour)
-                        
-                        # Verificar si está en ROI de puerta
-                        centro_x = x + w // 2
-                        centro_y = y + h // 2
-                        
-                        if self.esta_en_roi_puerta([centro_x, centro_y]):
-                            deteccion = Deteccion(
-                                timestamp=time.time(),
-                                bbox=[x, y, x + w, y + h],
-                                confianza=0.5,  # Confianza media para detección básica
-                                centro=[centro_x, centro_y],
-                                area=area
-                            )
-                            detecciones.append(deteccion)
+                    if area > 500:  # Área mínima reducida
+                        contours_filtered.append(contour)
+                
+                # Ordenar por área y tomar solo los 3 más grandes
+                contours_filtered.sort(key=cv2.contourArea, reverse=True)
+                contours_filtered = contours_filtered[:3]
+                
+                for contour in contours_filtered:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    
+                    # Escalar coordenadas de vuelta a la resolución original
+                    scale_x = self.config['resolucion'][0] / 160
+                    scale_y = self.config['resolucion'][1] / 120
+                    
+                    x_orig = int(x * scale_x)
+                    y_orig = int(y * scale_y)
+                    w_orig = int(w * scale_x)
+                    h_orig = int(h * scale_y)
+                    
+                    # Verificar si está en ROI de puerta
+                    centro_x = x_orig + w_orig // 2
+                    centro_y = y_orig + h_orig // 2
+                    
+                    if self.esta_en_roi_puerta([centro_x, centro_y]):
+                        deteccion = Deteccion(
+                            timestamp=time.time(),
+                            bbox=[x_orig, y_orig, x_orig + w_orig, y_orig + h_orig],
+                            confianza=0.6,  # Confianza aumentada
+                            centro=[centro_x, centro_y],
+                            area=w_orig * h_orig
+                        )
+                        detecciones.append(deteccion)
                 
                 # Actualizar frame anterior
                 self.frame_anterior = gray
@@ -1388,7 +1419,7 @@ def main():
     # Configuración optimizada para cámara Raspberry Pi AI Camera IMX500 con inferencias reales
     config = {
         'resolucion': [640, 480],
-        'fps_objetivo': 15,  # Reducido para inferencias AI
+        'fps_objetivo': 15,  # Optimizado para inferencias AI rápidas
         'confianza_minima': 0.3,  # Umbral para inferencias AI
         'area_minima': 800,  # Reducido para detectar personas más pequeñas
         'roi_puerta': [50, 50, 590, 430],  # ROI más amplio
