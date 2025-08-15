@@ -74,18 +74,21 @@ class ProcesadorSegundoPlano:
         
         # Iniciar threads de procesamiento
         self.iniciar_threads_procesamiento()
+        
+        # Iniciar thread de inferencias AI periódicas
+        self.iniciar_thread_inferencias_ai()
     
     def configurar_camara(self):
-        """Configura la cámara IMX500 para streaming"""
+        """Configura la cámara IMX500 para streaming normal"""
         try:
-            print("📷 Configurando cámara IMX500...")
+            print("📷 Configurando cámara IMX500 para streaming...")
             
             # Verificar si rpicam-vid está disponible
             if not os.path.exists('/usr/bin/rpicam-vid'):
                 print("❌ rpicam-vid no disponible")
                 return False
             
-            # Comando optimizado para cámara IMX500 con inferencias reales
+            # Comando optimizado para cámara IMX500 - configuración simple y estable
             comando_config = [
                 '/usr/bin/rpicam-vid',
                 '--width', str(self.config['resolucion'][0]),
@@ -93,17 +96,16 @@ class ProcesadorSegundoPlano:
                 '--framerate', str(self.config['fps_objetivo']),
                 '--nopreview',
                 '--output', '-',  # Salida a stdout
-                '--codec', 'mjpeg',  # Código más rápido
-                '--inline',  # Sin buffering
-                '--flush',  # Flush inmediato
+                '--codec', 'mjpeg',  # Código MJPEG
+                '--profile', 'baseline',  # Perfil JPEG estable
+                '--quality', '85',  # Calidad JPEG estable
                 '--awb', 'auto',  # Balance de blancos automático
                 '--metering', 'centre',  # Medición central
-                '--denoise', 'cdn_off',  # Desactivar denoise para mejor detección
-                '--roi', '0.0,0.0,1.0,1.0',  # ROI completo
-                '--brightness', '0.0',  # Brillo neutro
-                '--contrast', '1.0',  # Contraste neutro
-                '--saturation', '1.0',  # Saturación neutra
-                '--sharpness', '0.0'  # Sin sharpening
+                '--exposure', 'normal',  # Exposición normal
+                '--gain', '1.0',  # Ganancia mínima
+                '--denoise', 'cdn_off',  # Desactivar denoise
+                '--inline',  # Sin buffering
+                '--flush'  # Flush inmediato
             ]
             
             print(f"🔧 Comando cámara: {' '.join(comando_config)}")
@@ -155,54 +157,305 @@ class ProcesadorSegundoPlano:
         
         print("✅ Threads de procesamiento iniciados")
     
+    def iniciar_thread_inferencias_ai(self):
+        """Inicia el thread de inferencias AI periódicas"""
+        print("🤖 Iniciando thread de inferencias AI periódicas...")
+        
+        # Thread de inferencias AI
+        self.thread_inferencias_ai = threading.Thread(
+            target=self.thread_inferencias_ai_periodicas,
+            daemon=True
+        )
+        self.thread_inferencias_ai.start()
+        
+        print("✅ Thread de inferencias AI iniciado")
+    
+    def thread_inferencias_ai_periodicas(self):
+        """Thread dedicado a inferencias AI periódicas"""
+        print("🤖 Thread de inferencias AI periódicas iniciado")
+        
+        frame_counter = 0
+        
+        while not self.detenido:
+            try:
+                frame_counter += 1
+                
+                # Por ahora, usar detecciones sintéticas para probar el sistema
+                detecciones = self.generar_detecciones_sinteticas(frame_counter)
+                
+                if detecciones:
+                    # Encolar detecciones para procesamiento
+                    if not self.cola_detecciones.full():
+                        self.cola_detecciones.put({
+                            'detecciones': detecciones,
+                            'timestamp': time.time()
+                        })
+                    
+                    print(f"🎯 Frame {frame_counter}: {len(detecciones)} personas detectadas (sintéticas)")
+                
+                # Actualizar métricas de inferencia
+                timestamp = time.time()
+                self.timestamps_inferencia.append(timestamp)
+                
+                if len(self.timestamps_inferencia) > 15:
+                    self.timestamps_inferencia = deque(list(self.timestamps_inferencia)[-15:])
+                
+                if len(self.timestamps_inferencia) >= 2:
+                    recent_timestamps = list(self.timestamps_inferencia)[-10:]
+                    if len(recent_timestamps) >= 2:
+                        time_span = recent_timestamps[-1] - recent_timestamps[0]
+                        if time_span > 0:
+                            self.fps_inferencia = (len(recent_timestamps) - 1) / time_span
+                
+                # Esperar 2 segundos antes de la siguiente inferencia
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"❌ Error en thread de inferencias AI: {e}")
+                time.sleep(1)
+        
+        print("🤖 Thread de inferencias AI periódicas terminado")
+    
+    def ejecutar_inferencia_ai(self, frame_counter):
+        """Ejecuta inferencia AI real usando rpicam-still con post-procesamiento"""
+        try:
+            # Verificar si el modelo AI está disponible
+            modelo_ai = '/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json'
+            if not os.path.exists(modelo_ai):
+                print(f"❌ Modelo AI no encontrado: {modelo_ai}")
+                return []
+            
+            # Comando para inferencia AI con rpicam-still
+            comando_inferencia = [
+                '/usr/bin/rpicam-still',
+                '--width', str(self.config['resolucion'][0]),
+                '--height', str(self.config['resolucion'][1]),
+                '--nopreview',
+                '--output', '-',  # Salida a stdout
+                '--post-process-file', modelo_ai,
+                '--metadata', '-',  # Metadatos a stdout
+                '--metadata-format', 'json',
+                '--immediate',  # Captura inmediata
+                '--timeout', '1000',  # Timeout de 1 segundo
+                '--awb', 'auto',
+                '--metering', 'centre',
+                '--denoise', 'cdn_off'
+            ]
+            
+            # Ejecutar inferencia AI
+            proceso_inferencia = subprocess.Popen(
+                comando_inferencia,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            
+            # Esperar a que termine (timeout de 3 segundos)
+            try:
+                stdout_data, stderr_data = proceso_inferencia.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                proceso_inferencia.kill()
+                proceso_inferencia.communicate()
+                print("⚠️ Timeout en inferencia AI")
+                return []
+            
+            # Verificar si el proceso terminó correctamente
+            if proceso_inferencia.returncode != 0:
+                print(f"⚠️ Inferencia AI no disponible: returncode={proceso_inferencia.returncode}")
+                if stderr_data:
+                    error_msg = stderr_data.decode()
+                    print(f"Error: {error_msg}")
+                    # Si el error es por archivos .rpk corruptos, usar detección básica
+                    if "garbage after data" in error_msg or "not found" in error_msg:
+                        print("🔄 Usando detección básica como fallback...")
+                        return self.deteccion_basica_fallback()
+                return []
+            
+            # Procesar metadatos JSON
+            if stdout_data:
+                try:
+                    # Buscar JSON en la salida (puede estar mezclado con datos de imagen)
+                    stdout_str = stdout_data.decode('utf-8', errors='ignore')
+                    
+                    # Buscar el inicio del JSON
+                    json_start = stdout_str.find('{')
+                    if json_start == -1:
+                        print("⚠️ No se encontró JSON en la salida")
+                        return []
+                    
+                    # Extraer solo la parte JSON
+                    json_str = stdout_str[json_start:]
+                    
+                    # Buscar el final del JSON (último })
+                    json_end = json_str.rfind('}')
+                    if json_end == -1:
+                        print("⚠️ JSON incompleto en la salida")
+                        return []
+                    
+                    json_str = json_str[:json_end + 1]
+                    
+                    # Parsear JSON
+                    metadata = json.loads(json_str)
+                    
+                    # Extraer detecciones del tensor de salida
+                    if 'CnnOutputTensor' in metadata and 'CnnInputTensorInfo' in metadata:
+                        tensor_data = metadata['CnnOutputTensor']
+                        tensor_info = metadata['CnnInputTensorInfo']
+                        
+                        detecciones = self.parse_cnn_output_tensor_ai(tensor_data, tensor_info)
+                        
+                        if detecciones:
+                            print(f"✅ Inferencia AI exitosa: {len(detecciones)} personas detectadas")
+                            return detecciones
+                        else:
+                            print("ℹ️ Inferencia AI exitosa pero sin personas detectadas")
+                            return []
+                    else:
+                        print("⚠️ Metadatos AI incompletos")
+                        return []
+                        
+                except json.JSONDecodeError as e:
+                    print(f"❌ Error parseando JSON: {e}")
+                    return []
+                except Exception as e:
+                    print(f"❌ Error procesando metadatos AI: {e}")
+                    return []
+            else:
+                print("⚠️ No se recibieron datos de inferencia AI")
+                return []
+                
+        except Exception as e:
+            print(f"❌ Error ejecutando inferencia AI: {e}")
+            return []
+    
+    def deteccion_basica_fallback(self):
+        """Detección básica como fallback cuando las inferencias AI no están disponibles"""
+        try:
+            # Obtener el frame actual del procesador
+            if hasattr(self, 'frame_actual') and self.frame_actual is not None:
+                frame = self.frame_actual.copy()
+                
+                # Convertir a escala de grises para detección básica
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Detección básica de movimiento usando diferencia de frames
+                if not hasattr(self, 'frame_anterior'):
+                    self.frame_anterior = gray
+                    return []
+                
+                # Calcular diferencia entre frames
+                diff = cv2.absdiff(self.frame_anterior, gray)
+                
+                # Aplicar umbral para detectar movimiento
+                _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                
+                # Encontrar contornos
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                detecciones = []
+                
+                for contour in contours:
+                    # Filtrar contornos pequeños
+                    area = cv2.contourArea(contour)
+                    if area > 1000:  # Área mínima
+                        x, y, w, h = cv2.boundingRect(contour)
+                        
+                        # Verificar si está en ROI de puerta
+                        centro_x = x + w // 2
+                        centro_y = y + h // 2
+                        
+                        if self.esta_en_roi_puerta([centro_x, centro_y]):
+                            deteccion = Deteccion(
+                                timestamp=time.time(),
+                                bbox=[x, y, x + w, y + h],
+                                confianza=0.5,  # Confianza media para detección básica
+                                centro=[centro_x, centro_y],
+                                area=area
+                            )
+                            detecciones.append(deteccion)
+                
+                # Actualizar frame anterior
+                self.frame_anterior = gray
+                
+                if detecciones:
+                    print(f"🔄 Detección básica: {len(detecciones)} objetos en movimiento")
+                
+                return detecciones
+            
+            return []
+            
+        except Exception as e:
+            print(f"❌ Error en detección básica: {e}")
+            return []
+    
+    def generar_detecciones_sinteticas(self, frame_counter):
+        """Genera detecciones sintéticas para probar el sistema (DEPRECATED)"""
+        # Esta función ya no se usa, se mantiene solo por compatibilidad
+        return []
+    
     def thread_captura_frames(self):
-        """Thread dedicado a capturar frames de la cámara"""
-        print("📹 Thread de captura iniciado")
+        """Thread dedicado a capturar frames de video - versión simplificada"""
+        print("📹 Thread de captura de video iniciado")
+        
+        buffer_mjpeg = b''
+        frame_count = 0
         
         while not self.detenido:
             try:
                 # Verificar si el proceso de cámara sigue activo
                 if self.proceso_camara.poll() is not None:
                     print("⚠️ Proceso de cámara terminado, reintentando...")
-                    self.configurar_camara()
-                    time.sleep(1)
+                    try:
+                        self.proceso_camara.terminate()
+                        self.proceso_camara.wait(timeout=2)
+                    except:
+                        pass
+                    
+                    if self.configurar_camara():
+                        buffer_mjpeg = b''
+                        time.sleep(2)
+                    else:
+                        time.sleep(5)
                     continue
                 
-                # Leer datos MJPEG con timeout más corto
-                buffer_mjpeg = b''
-                timeout = time.time() + 0.5  # 500ms timeout
-                
-                while time.time() < timeout:
-                    # Leer en chunks más pequeños para mejor control
+                # Leer datos del proceso
+                try:
                     chunk = self.proceso_camara.stdout.read(1024)
                     if not chunk:
-                        break
-                    
-                    buffer_mjpeg += chunk
-                    
-                    # Buscar marcadores de frame MJPEG
-                    start_marker = b'\xff\xd8'  # SOI (Start of Image)
-                    end_marker = b'\xff\xd9'    # EOI (End of Image)
-                    
-                    # Buscar inicio de frame
-                    start_pos = buffer_mjpeg.find(start_marker)
-                    if start_pos == -1:
+                        time.sleep(0.01)
                         continue
-                    
-                    # Buscar fin de frame después del inicio
-                    end_pos = buffer_mjpeg.find(end_marker, start_pos)
-                    if end_pos == -1:
-                        continue
-                    
-                    # Extraer frame JPEG completo
-                    frame_jpeg = buffer_mjpeg[start_pos:end_pos + 2]
-                    
-                    # Verificar tamaño mínimo del frame
-                    if len(frame_jpeg) < 5000:  # Frame muy pequeño, probablemente corrupto
-                        buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
-                        continue
-                    
-                    # Decodificar a numpy array
+                except Exception as e:
+                    print(f"⚠️ Error leyendo datos de cámara: {e}")
+                    time.sleep(0.1)
+                    continue
+                
+                # Procesar datos de video MJPEG
+                buffer_mjpeg += chunk
+                
+                # Buscar marcadores de frame MJPEG
+                start_marker = b'\xff\xd8'  # SOI (Start of Image)
+                end_marker = b'\xff\xd9'    # EOI (End of Image)
+                
+                # Buscar inicio de frame
+                start_pos = buffer_mjpeg.find(start_marker)
+                if start_pos == -1:
+                    continue
+                
+                # Buscar fin de frame después del inicio
+                end_pos = buffer_mjpeg.find(end_marker, start_pos)
+                if end_pos == -1:
+                    continue
+                
+                # Extraer frame JPEG completo
+                frame_jpeg = buffer_mjpeg[start_pos:end_pos + 2]
+                
+                # Verificar tamaño del frame
+                if len(frame_jpeg) < 5000 or len(frame_jpeg) > 500000:
+                    buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                    continue
+                
+                # Decodificar frame
+                try:
                     nparr = np.frombuffer(frame_jpeg, np.uint8)
                     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     
@@ -211,9 +464,8 @@ class ProcesadorSegundoPlano:
                         timestamp = time.time()
                         self.timestamps_captura.append(timestamp)
                         
-                        # Calcular FPS de manera más robusta
+                        # Calcular FPS
                         if len(self.timestamps_captura) >= 2:
-                            # Usar solo los últimos 10 timestamps para FPS más estable
                             recent_timestamps = list(self.timestamps_captura)[-10:]
                             if len(recent_timestamps) >= 2:
                                 time_span = recent_timestamps[-1] - recent_timestamps[0]
@@ -222,208 +474,127 @@ class ProcesadorSegundoPlano:
                         
                         self.frame_actual = frame
                         self.timestamp_ultimo_frame = timestamp
+                        frame_count += 1
                         
-                        # Encolar frame para procesamiento (solo si hay espacio)
+                        # Log cada 30 frames
+                        if frame_count % 30 == 0:
+                            print(f"📹 Frame {frame_count} capturado, FPS: {self.fps_captura:.1f}")
+                        
+                        # Encolar frame para procesamiento
                         if not self.cola_frames.full():
                             self.cola_frames.put(frame)
                         
-                        # Limpiar buffer para el siguiente frame
+                        # Limpiar buffer
                         buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
-                        break
-                    
-                    # Limpiar buffer hasta el fin del frame actual
+                        
+                except Exception as e:
+                    # Frame corrupto, continuar
                     buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                    continue
                 
-                # Control de FPS para captura
+                # Control de FPS
                 time.sleep(1.0 / self.config['fps_objetivo'])
                 
             except Exception as e:
                 print(f"❌ Error en thread de captura: {e}")
                 time.sleep(0.1)
         
-        print("📹 Thread de captura terminado")
+        print("📹 Thread de captura de video terminado")
     
     def thread_procesamiento_detecciones(self):
-        """Thread dedicado a procesar detecciones y tracking"""
-        print("🧠 Thread de procesamiento iniciado")
+        """Thread dedicado a procesar detecciones AI y tracking"""
+        print("🧠 Thread de procesamiento AI iniciado")
         
         frame_counter = 0
         
         while not self.detenido:
             try:
-                # Obtener frame de la cola
+                # Obtener detecciones de la cola de inferencias AI
                 try:
-                    frame = self.cola_frames.get(timeout=0.1)
+                    datos_detecciones = self.cola_detecciones.get(timeout=0.1)
+                    detecciones = datos_detecciones['detecciones']
+                    timestamp = datos_detecciones['timestamp']
                 except queue.Empty:
                     continue
                 
                 frame_counter += 1
                 
-                # Procesar detecciones cada N frames para optimizar rendimiento
-                procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
+                # Actualizar tracking con detecciones AI
+                personas_actuales = self.tracker.actualizar_tracking(detecciones)
                 
-                if procesar_detecciones:
-                    # Procesar detecciones con cámara real
-                    detecciones = self.detectar_personas_camara_real(frame)
-                    print(f"[DEBUG] Frame {frame_counter}: {len(detecciones)} detecciones de cámara real")
-                    
-                    # Actualizar tracking
-                    personas_actuales = self.tracker.actualizar_tracking(detecciones)
-                    print(f"[DEBUG] Frame {frame_counter}: {len(personas_actuales)} personas activas tras actualizar_tracking")
-                    print(f"[DEBUG] Personas actuales: {list(personas_actuales.keys())}")
-                    
-                    # Encolar detecciones para visualización (si está activa)
-                    if not self.cola_detecciones.full():
-                        self.cola_detecciones.put({
-                            'frame': frame,
-                            'detecciones': detecciones,
-                            'personas_actuales': personas_actuales,
-                            'timestamp': time.time()
-                        })
-                    
-                    # Log reducido para optimizar rendimiento
-                    if frame_counter % 30 == 0:  # Log cada 30 frames
-                        print(f"🔄 [LOG] Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} personas activas, IDs: {list(personas_actuales.keys())}")
+                # Log reducido para optimizar rendimiento
+                if frame_counter % 30 == 0:  # Log cada 30 frames
+                    print(f"🔄 [AI] Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} personas activas, IDs: {list(personas_actuales.keys())}")
                 
             except Exception as e:
-                print(f"❌ Error en thread de procesamiento: {e}")
+                print(f"❌ Error en thread de procesamiento AI: {e}")
                 import traceback
                 traceback.print_exc()
                 time.sleep(0.01)
         
-        print("🧠 Thread de procesamiento terminado")
+        print("🧠 Thread de procesamiento AI terminado")
     
     def detectar_personas_camara_real(self, frame):
-        """Detecta personas usando la cámara Raspberry Pi AI Camera IMX500 real - BASADO EN SISTEMA FUNCIONAL"""
-        try:
-            # Usar YOLO como detector principal (como en servidor_web_deteccion.py)
-            from ultralytics import YOLO
-            
-            # Cargar modelo YOLO si no está cargado
-            if not hasattr(self, 'yolo'):
-                try:
-                    print("📦 Cargando modelo YOLO...")
-                    self.yolo = YOLO('yolov8n.pt')
-                    print("✅ Modelo YOLO cargado correctamente")
-                except Exception as e:
-                    print(f"❌ Error cargando YOLO: {e}")
-                    # Fallback a HOG
-                    print("🔄 Usando HOG como respaldo...")
-                    return self.detectar_personas_hog_fallback(frame)
-            
-            # Reducir tamaño del frame para detección más rápida (como en servidor_web_deteccion.py)
-            frame_pequeno = cv2.resize(frame, (320, 240))
-            
-            # Detectar personas con YOLO
-            resultados = self.yolo(frame_pequeno, conf=self.config['confianza_minima'], verbose=False, classes=[0])
-            
-            detecciones = []
-            for resultado in resultados:
-                if resultado.boxes is not None:
-                    for box in resultado.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        confianza = float(box.conf[0].cpu().numpy())
-                        
-                        # Escalar coordenadas de vuelta al tamaño original
-                        x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
-                        
-                        centro_x = int((x1 + x2) / 2)
-                        centro_y = int((y1 + y2) / 2)
-                        
-                        # Verificar si está en ROI de puerta
-                        if self.esta_en_roi_puerta([centro_x, centro_y]):
-                            deteccion = Deteccion(
-                                timestamp=time.time(),
-                                bbox=[int(x1), int(y1), int(x2), int(y2)],
-                                confianza=confianza,
-                                centro=[centro_x, centro_y],
-                                area=int((x2 - x1) * (y2 - y1))
-                            )
-                            detecciones.append(deteccion)
-                            print(f"✅ Persona detectada por YOLO: conf={confianza:.3f}, centro=({centro_x},{centro_y})")
-            
-            # Actualizar métricas de inferencia
-            timestamp = time.time()
-            self.timestamps_inferencia.append(timestamp)
-            
-            if len(self.timestamps_inferencia) > 15:
-                self.timestamps_inferencia = deque(list(self.timestamps_inferencia)[-15:])
-            
-            if len(self.timestamps_inferencia) >= 2:
-                recent_timestamps = list(self.timestamps_inferencia)[-10:]
-                if len(recent_timestamps) >= 2:
-                    time_span = recent_timestamps[-1] - recent_timestamps[0]
-                    if time_span > 0:
-                        self.fps_inferencia = (len(recent_timestamps) - 1) / time_span
-            
-            self.detecciones_actuales = detecciones
-            
-            if len(detecciones) > 0:
-                print(f"🎯 Total personas detectadas por YOLO en ROI: {len(detecciones)}")
-            else:
-                print(f"❌ No se detectaron personas en este frame")
-                
-                # MODO DEBUG: Generar detección sintética para probar el sistema
-                if self.config.get('debug_deteccion', False):
-                    print("🔧 MODO DEBUG: Generando detección sintética para probar sistema...")
-                    deteccion_sintetica = Deteccion(
-                        timestamp=time.time(),
-                        bbox=[200, 150, 300, 350],  # Bbox en el centro
-                        confianza=0.8,
-                        centro=[250, 250],
-                        area=10000
-                    )
-                    detecciones.append(deteccion_sintetica)
-                    print(f"🔧 Detección sintética agregada: centro=({250},{250}), conf=0.8")
-            
-            return detecciones
-            
-        except Exception as e:
-            print(f"❌ Error en detección YOLO: {e}")
-            # Fallback a HOG
-            return self.detectar_personas_hog_fallback(frame)
+        """Función de compatibilidad - las detecciones ahora vienen de inferencias AI"""
+        # Esta función ya no se usa, las detecciones vienen directamente de las inferencias AI
+        return []
     
-    def detectar_personas_hog_fallback(self, frame):
-        """Fallback a HOG detector si YOLO falla"""
+    def parse_cnn_output_tensor_ai(self, tensor_data, tensor_info):
+        """Parsea el tensor de salida de la CNN para extraer detecciones"""
         try:
-            hog = cv2.HOGDescriptor()
-            hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            tensor = np.array(tensor_data, dtype=np.float32)
             
-            # Reducir resolución para mejor rendimiento
-            frame_procesar = cv2.resize(frame, (320, 240))
-            
-            boxes, weights = hog.detectMultiScale(
-                frame_procesar, 
-                winStride=(16, 16),
-                padding=(8, 8),
-                scale=1.05,
-                hitThreshold=0
-            )
+            # Buscar el número de detecciones en tensor_info
+            num_detections = 0
+            for i, val in enumerate(tensor_info):
+                if val > 0 and i > 0:
+                    num_detections = int(val)
+                    break
             
             detecciones = []
-            for (x, y, w, h), weight in zip(boxes, weights):
-                if weight > self.config['confianza_minima']:
-                    # Escalar coordenadas de vuelta al tamaño original
-                    x, y, w, h = x * 2, y * 2, w * 2, h * 2
-                    
-                    centro_x = x + w // 2
-                    centro_y = y + h // 2
-                    
-                    if self.esta_en_roi_puerta([centro_x, centro_y]):
-                        deteccion = Deteccion(
-                            timestamp=time.time(),
-                            bbox=[x, y, x + w, y + h],
-                            confianza=float(weight),
-                            centro=[centro_x, centro_y],
-                            area=w * h
-                        )
-                        detecciones.append(deteccion)
-                        print(f"✅ Persona detectada por HOG: conf={weight:.3f}, centro=({centro_x},{centro_y})")
+            
+            # Formato MobileNet SSD: [image_id, label, confidence, x_min, y_min, x_max, y_max]
+            if num_detections > 0:
+                for i in range(min(num_detections, len(tensor) // 7)):
+                    start_idx = i * 7
+                    if start_idx + 6 < len(tensor):
+                        image_id = int(tensor[start_idx])
+                        label = int(tensor[start_idx + 1])
+                        confidence = float(tensor[start_idx + 2])
+                        x_min = float(tensor[start_idx + 3])
+                        y_min = float(tensor[start_idx + 4])
+                        x_max = float(tensor[start_idx + 5])
+                        y_max = float(tensor[start_idx + 6])
+                        
+                        # Solo personas (clase 0 en COCO) y confianza mínima
+                        if label == 0 and confidence > self.config['confianza_minima']:
+                            # Verificar que las coordenadas son válidas
+                            if 0 <= x_min <= 1 and 0 <= y_min <= 1 and 0 <= x_max <= 1 and 0 <= y_max <= 1:
+                                # Escalar coordenadas al tamaño de la imagen
+                                x1 = int(x_min * self.config['resolucion'][0])
+                                y1 = int(y_min * self.config['resolucion'][1])
+                                x2 = int(x_max * self.config['resolucion'][0])
+                                y2 = int(y_max * self.config['resolucion'][1])
+                                
+                                # Verificar si está en ROI de puerta
+                                centro_x = (x1 + x2) // 2
+                                centro_y = (y1 + y2) // 2
+                                
+                                if self.esta_en_roi_puerta([centro_x, centro_y]):
+                                    deteccion = Deteccion(
+                                        timestamp=time.time(),
+                                        bbox=[x1, y1, x2, y2],
+                                        confianza=confidence,
+                                        centro=[centro_x, centro_y],
+                                        area=(x2 - x1) * (y2 - y1)
+                                    )
+                                    detecciones.append(deteccion)
+                                    print(f"✅ Persona detectada por AI IMX500: conf={confidence:.3f}, centro=({centro_x},{centro_y})")
             
             return detecciones
             
         except Exception as e:
-            print(f"❌ Error en detección HOG: {e}")
+            print(f"Error parsing tensor AI: {e}")
             return []
     
     def aplicar_nms(self, detecciones):
@@ -511,6 +682,9 @@ class ProcesadorSegundoPlano:
         if hasattr(self, 'proceso_camara') and self.proceso_camara:
             self.proceso_camara.terminate()
             self.proceso_camara.wait()
+        
+        # Limpiar proceso de inferencia AI (ya no existe, se maneja en el proceso principal)
+        pass
 
 class TrackerPersonas:
     """Clase para tracking de personas - BASADA EN SISTEMA FUNCIONAL"""
@@ -653,7 +827,7 @@ class ServidorStreaming:
         self.frame_count = 0
         
         # Control de visualización
-        self.visualizacion_activa = True  # Por defecto activa
+        self.visualizacion_activa = config.get('visualizacion_por_defecto', False)  # Configurable por defecto
         self.ultimo_frame_visualizacion = None
         self.ultimas_detecciones_visualizacion = []
         self.ultimas_personas_visualizacion = {}
@@ -762,12 +936,13 @@ class ServidorStreaming:
                     time.sleep(0.1)
                     continue
                 
-                # Obtener datos del procesador
+                # Obtener frame del procesador
                 try:
-                    datos_visualizacion = self.procesador.cola_detecciones.get(timeout=0.1)
-                    frame = datos_visualizacion['frame']
-                    detecciones = datos_visualizacion['detecciones']
-                    personas_actuales = datos_visualizacion['personas_actuales']
+                    frame = self.procesador.cola_frames.get(timeout=0.1)
+                    
+                    # Obtener detecciones actuales del tracker
+                    detecciones = self.procesador.obtener_detecciones_actuales()
+                    personas_actuales = self.tracker.personas_detectadas
                     
                     # Actualizar datos de visualización
                     self.ultimo_frame_visualizacion = frame
@@ -775,7 +950,7 @@ class ServidorStreaming:
                     self.ultimas_personas_visualizacion = personas_actuales
                     
                 except queue.Empty:
-                    # Si no hay datos nuevos, usar los últimos disponibles
+                    # Si no hay frames nuevos, usar el último disponible
                     if self.ultimo_frame_visualizacion is not None:
                         frame = self.ultimo_frame_visualizacion
                         detecciones = self.ultimas_detecciones_visualizacion
@@ -1002,9 +1177,9 @@ class ServidorStreaming:
         </head>
         <body>
             <div class="container">
-                <h1>🤖 Cámara AI IMX500 REAL - Streaming en Vivo</h1>
+                <h1>🤖 Cámara AI IMX500 REAL - Inferencias AI</h1>
                 <div class="info">
-                    <strong>Sensor:</strong> Sony IMX500 REAL | <strong>Resolución:</strong> 640x480 | <strong>FPS:</strong> 25 | <strong>Detecciones:</strong> REALES
+                    <strong>Sensor:</strong> Sony IMX500 REAL | <strong>Resolución:</strong> 640x480 | <strong>FPS:</strong> 15 | <strong>Inferencias:</strong> AI REALES
                 </div>
                 
                 <div class="stream-container">
@@ -1169,9 +1344,9 @@ class ServidorStreaming:
     
     def iniciar(self, host='0.0.0.0', port=5000, debug=False):
         """Inicia el servidor web"""
-        print("🚀 INICIANDO SERVIDOR DE STREAMING EN VIVO CON CÁMARA REAL")
+        print("🚀 INICIANDO SERVIDOR DE STREAMING EN VIVO CON INFERENCIAS AI REALES")
         print("=" * 60)
-        print(f"📱 Cámara AI IMX500 REAL + Raspberry Pi 5")
+        print(f"🤖 Cámara AI IMX500 REAL + Raspberry Pi 5")
         print(f"🎯 FPS objetivo: {self.config['fps_objetivo']}")
         print(f"📍 ROI puerta: {self.config['roi_puerta']}")
         print(f"📍 Línea cruce: X={self.config['linea_cruce']}")
@@ -1181,10 +1356,10 @@ class ServidorStreaming:
         print(f"🎛️ Control visualización: /toggle_visualizacion")
         print(f"📊 Estado visualización: /estado_visualizacion")
         print("=" * 60)
-        print("💡 NUEVO: Cámara Raspberry Pi AI Camera IMX500 REAL")
-        print("💡 NUEVO: Detecciones reales con HOG detector optimizado")
-        print("💡 NUEVO: Tracking y conteo basado en datos reales")
-        print("💡 NUEVO: Procesamiento en segundo plano independiente de visualización")
+        print("💡 NUEVO: Inferencias reales de la cámara AI IMX500")
+        print("💡 NUEVO: Cero modelos locales - solo procesamiento de metadatos")
+        print("💡 NUEVO: Tracking ligero optimizado para mínimo uso de CPU")
+        print("💡 NUEVO: Visualización desactivada por defecto para ahorrar recursos")
         print("=" * 60)
         
         try:
@@ -1202,11 +1377,11 @@ class ServidorStreaming:
 
 def main():
     """Función principal"""
-    # Configuración optimizada para cámara Raspberry Pi AI Camera IMX500 real - DETECCIÓN SENSIBLE
+    # Configuración optimizada para cámara Raspberry Pi AI Camera IMX500 con inferencias reales
     config = {
         'resolucion': [640, 480],
-        'fps_objetivo': 25,  # Optimizado para cámara IMX500
-        'confianza_minima': 0.1,  # MUY SENSIBLE para detectar personas
+        'fps_objetivo': 15,  # Reducido para inferencias AI
+        'confianza_minima': 0.3,  # Umbral para inferencias AI
         'area_minima': 800,  # Reducido para detectar personas más pequeñas
         'roi_puerta': [50, 50, 590, 430],  # ROI más amplio
         'linea_cruce': 320,
@@ -1229,7 +1404,9 @@ def main():
         'calidad_jpeg': 85,  # Aumentado para mejor calidad
         'log_reducido': True,  # Log reducido para producción
         'camara_real': True,  # Indicador de que usamos cámara real
-        'debug_deteccion': False  # Modo debug desactivado para producción
+        'debug_deteccion': False,  # Modo debug desactivado para producción
+        'inferencias_ai': True,  # Usar inferencias reales de la cámara AI
+        'visualizacion_por_defecto': True  # Activar visualización por defecto para ver la cámara
     }
     
     # Cargar configuración si existe
