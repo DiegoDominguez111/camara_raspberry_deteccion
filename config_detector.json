@@ -1,8 +1,8 @@
 {
   "resolucion": [640, 480],
   "fps_objetivo": 25,
-  "confianza_minima": 0.5,
-  "area_minima": 2500,
+  "confianza_minima": 0.3,
+  "area_minima": 1000,
   "roi_puerta": [80, 80, 560, 400],
   "linea_cruce": 320,
   "ancho_banda_cruce": 5,

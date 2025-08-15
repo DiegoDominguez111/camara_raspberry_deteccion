@@ -2,6 +2,7 @@
 """
 Servidor Web de Streaming en Vivo con Cámara AI IMX500
 Captura video, procesa detecciones de personas y sirve streaming MJPEG con anotaciones
+Sistema optimizado con procesamiento en segundo plano y visualización dinámica
 """
 
 import cv2
@@ -43,12 +44,14 @@ class Track:
     activo: bool = True # Nuevo campo para indicar si el track está activo
     frames_sin_detectar: int = 0 # Nuevo campo para contar frames sin detectar
 
-class CamaraIMX500:
-    """Clase para manejar la cámara IMX500"""
+class ProcesadorSegundoPlano:
+    """Clase para procesamiento en segundo plano independiente del renderizado"""
     
     def __init__(self, config):
         self.config = config
-        self.proceso_camara = None
+        self.detenido = False
+        
+        # Estado del procesamiento
         self.frame_actual = None
         self.detecciones_actuales = []
         self.timestamp_ultimo_frame = 0
@@ -59,8 +62,18 @@ class CamaraIMX500:
         self.timestamps_captura = deque(maxlen=30)
         self.timestamps_inferencia = deque(maxlen=30)
         
+        # Colas para comunicación entre threads
+        self.cola_frames = queue.Queue(maxsize=10)
+        self.cola_detecciones = queue.Queue(maxsize=50)
+        
         # Configurar cámara
         self.configurar_camara()
+        
+        # Inicializar tracker
+        self.tracker = TrackerPersonas(config)
+        
+        # Iniciar threads de procesamiento
+        self.iniciar_threads_procesamiento()
     
     def configurar_camara(self):
         """Configura la cámara IMX500 para streaming"""
@@ -122,111 +135,163 @@ class CamaraIMX500:
             print(f"❌ Error configurando cámara: {e}")
             return False
     
-    def leer_frame(self):
-        """Lee un frame de la cámara usando un enfoque más robusto para MJPEG"""
-        if not self.proceso_camara:
-            return None
+    def iniciar_threads_procesamiento(self):
+        """Inicia los threads de procesamiento en segundo plano"""
+        print("🧵 Iniciando threads de procesamiento en segundo plano...")
         
-        try:
-            # Verificar si el proceso de cámara sigue activo
-            if self.proceso_camara.poll() is not None:
-                print("⚠️ Proceso de cámara terminado, reintentando...")
-                self.configurar_camara()
-                return None
-            
-            # Leer datos MJPEG con timeout más corto
-            buffer_mjpeg = b''
-            timeout = time.time() + 0.5  # 500ms timeout
-            
-            while time.time() < timeout:
-                # Leer en chunks más pequeños para mejor control
-                chunk = self.proceso_camara.stdout.read(1024)
-                if not chunk:
-                    break
-                
-                buffer_mjpeg += chunk
-                
-                # Buscar marcadores de frame MJPEG
-                start_marker = b'\xff\xd8'  # SOI (Start of Image)
-                end_marker = b'\xff\xd9'    # EOI (End of Image)
-                
-                # Buscar inicio de frame
-                start_pos = buffer_mjpeg.find(start_marker)
-                if start_pos == -1:
-                    continue
-                
-                # Buscar fin de frame después del inicio
-                end_pos = buffer_mjpeg.find(end_marker, start_pos)
-                if end_pos == -1:
-                    continue
-                
-                # Extraer frame JPEG completo
-                frame_jpeg = buffer_mjpeg[start_pos:end_pos + 2]
-                
-                # Verificar tamaño mínimo del frame
-                if len(frame_jpeg) < 5000:  # Frame muy pequeño, probablemente corrupto
-                    buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
-                    continue
-                
-                # Decodificar a numpy array
-                nparr = np.frombuffer(frame_jpeg, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if frame is not None and frame.shape[0] > 0 and frame.shape[1] > 0:
-                    # Actualizar métricas
-                    timestamp = time.time()
-                    self.timestamps_captura.append(timestamp)
-                    
-                    # Calcular FPS de manera más robusta
-                    if len(self.timestamps_captura) >= 2:
-                        # Usar solo los últimos 10 timestamps para FPS más estable
-                        recent_timestamps = list(self.timestamps_captura)[-10:]
-                        if len(recent_timestamps) >= 2:
-                            time_span = recent_timestamps[-1] - recent_timestamps[0]
-                            if time_span > 0:
-                                self.fps_captura = (len(recent_timestamps) - 1) / time_span
-                    
-                    self.frame_actual = frame
-                    self.timestamp_ultimo_frame = timestamp
-                    
-                    # Limpiar buffer para el siguiente frame
-                    buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
-                    return frame
-                
-                # Limpiar buffer hasta el fin del frame actual
-                buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
-            
-            # Si no se pudo leer un frame válido, generar uno de placeholder
-            if self.frame_actual is None:
-                return self.generar_frame_placeholder()
-            
-            return self.frame_actual
-            
-        except Exception as e:
-            print(f"❌ Error leyendo frame: {e}")
-            return self.generar_frame_placeholder()
+        # Thread de captura de frames
+        self.thread_captura = threading.Thread(
+            target=self.thread_captura_frames,
+            daemon=True
+        )
+        self.thread_captura.start()
+        
+        # Thread de procesamiento de detecciones
+        self.thread_procesamiento = threading.Thread(
+            target=self.thread_procesamiento_detecciones,
+            daemon=True
+        )
+        self.thread_procesamiento.start()
+        
+        print("✅ Threads de procesamiento iniciados")
     
-    def generar_frame_placeholder(self):
-        """Genera un frame de placeholder cuando no hay video"""
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    def thread_captura_frames(self):
+        """Thread dedicado a capturar frames de la cámara"""
+        print("📹 Thread de captura iniciado")
         
-        # Texto de estado
-        cv2.putText(frame, "CAMARA NO DISPONIBLE", (150, 200), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        cv2.putText(frame, "Verificando conexion...", (180, 250), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        while not self.detenido:
+            try:
+                # Verificar si el proceso de cámara sigue activo
+                if self.proceso_camara.poll() is not None:
+                    print("⚠️ Proceso de cámara terminado, reintentando...")
+                    self.configurar_camara()
+                    time.sleep(1)
+                    continue
+                
+                # Leer datos MJPEG con timeout más corto
+                buffer_mjpeg = b''
+                timeout = time.time() + 0.5  # 500ms timeout
+                
+                while time.time() < timeout:
+                    # Leer en chunks más pequeños para mejor control
+                    chunk = self.proceso_camara.stdout.read(1024)
+                    if not chunk:
+                        break
+                    
+                    buffer_mjpeg += chunk
+                    
+                    # Buscar marcadores de frame MJPEG
+                    start_marker = b'\xff\xd8'  # SOI (Start of Image)
+                    end_marker = b'\xff\xd9'    # EOI (End of Image)
+                    
+                    # Buscar inicio de frame
+                    start_pos = buffer_mjpeg.find(start_marker)
+                    if start_pos == -1:
+                        continue
+                    
+                    # Buscar fin de frame después del inicio
+                    end_pos = buffer_mjpeg.find(end_marker, start_pos)
+                    if end_pos == -1:
+                        continue
+                    
+                    # Extraer frame JPEG completo
+                    frame_jpeg = buffer_mjpeg[start_pos:end_pos + 2]
+                    
+                    # Verificar tamaño mínimo del frame
+                    if len(frame_jpeg) < 5000:  # Frame muy pequeño, probablemente corrupto
+                        buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                        continue
+                    
+                    # Decodificar a numpy array
+                    nparr = np.frombuffer(frame_jpeg, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None and frame.shape[0] > 0 and frame.shape[1] > 0:
+                        # Actualizar métricas
+                        timestamp = time.time()
+                        self.timestamps_captura.append(timestamp)
+                        
+                        # Calcular FPS de manera más robusta
+                        if len(self.timestamps_captura) >= 2:
+                            # Usar solo los últimos 10 timestamps para FPS más estable
+                            recent_timestamps = list(self.timestamps_captura)[-10:]
+                            if len(recent_timestamps) >= 2:
+                                time_span = recent_timestamps[-1] - recent_timestamps[0]
+                                if time_span > 0:
+                                    self.fps_captura = (len(recent_timestamps) - 1) / time_span
+                        
+                        self.frame_actual = frame
+                        self.timestamp_ultimo_frame = timestamp
+                        
+                        # Encolar frame para procesamiento (solo si hay espacio)
+                        if not self.cola_frames.full():
+                            self.cola_frames.put(frame)
+                        
+                        # Limpiar buffer para el siguiente frame
+                        buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                        break
+                    
+                    # Limpiar buffer hasta el fin del frame actual
+                    buffer_mjpeg = buffer_mjpeg[end_pos + 2:]
+                
+                # Control de FPS para captura
+                time.sleep(1.0 / self.config['fps_objetivo'])
+                
+            except Exception as e:
+                print(f"❌ Error en thread de captura: {e}")
+                time.sleep(0.1)
         
-        # Dibujar icono de cámara
-        cv2.circle(frame, (320, 100), 50, (0, 255, 255), 3)
-        cv2.circle(frame, (320, 100), 20, (0, 255, 255), -1)
+        print("📹 Thread de captura terminado")
+    
+    def thread_procesamiento_detecciones(self):
+        """Thread dedicado a procesar detecciones y tracking"""
+        print("🧠 Thread de procesamiento iniciado")
         
-        # Mostrar métricas básicas
-        cv2.putText(frame, f"FPS: {self.fps_captura:.1f}", (50, 350), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, f"Proceso: {'Activo' if self.proceso_camara else 'Inactivo'}", (50, 380), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        frame_counter = 0
         
-        return frame
+        while not self.detenido:
+            try:
+                # Obtener frame de la cola
+                try:
+                    frame = self.cola_frames.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                
+                frame_counter += 1
+                
+                # Procesar detecciones cada N frames para optimizar rendimiento
+                procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
+                
+                if procesar_detecciones:
+                    # Procesar detecciones
+                    detecciones = self.simular_detecciones(frame)
+                    print(f"[DEBUG] Frame {frame_counter}: {len(detecciones)} detecciones generadas")
+                    
+                    # Actualizar tracking
+                    personas_actuales = self.tracker.actualizar_tracking(detecciones)
+                    print(f"[DEBUG] Frame {frame_counter}: {len(personas_actuales)} tracks activos tras actualizar_tracking")
+                    print(f"[DEBUG] Tracks actuales: {[tid for tid in self.tracker.tracks.keys()]}")
+                    
+                    # Encolar detecciones para visualización (si está activa)
+                    if not self.cola_detecciones.full():
+                        self.cola_detecciones.put({
+                            'frame': frame,
+                            'detecciones': detecciones,
+                            'personas_actuales': personas_actuales,
+                            'timestamp': time.time()
+                        })
+                    
+                    # Log reducido para optimizar rendimiento
+                    if frame_counter % 30 == 0:  # Log cada 30 frames
+                        print(f"🔄 [LOG] Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} tracks, tracks activos: {[tid for tid in self.tracker.tracks.keys()]}")
+                
+            except Exception as e:
+                print(f"❌ Error en thread de procesamiento: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.01)
+        
+        print("🧠 Thread de procesamiento terminado")
     
     def simular_detecciones(self, frame):
         """Detecta personas usando HOG detector optimizado para Raspberry Pi con FPS estable"""
@@ -331,56 +396,6 @@ class CamaraIMX500:
             traceback.print_exc()
             return []
     
-    def filtrar_por_estabilidad(self, detecciones):
-        """Filtra detecciones por estabilidad temporal para mejorar persistencia"""
-        if not hasattr(self, 'detecciones_historial'):
-            self.detecciones_historial = []
-        
-        # Agregar detecciones actuales al historial
-        self.detecciones_historial.append({
-            'timestamp': time.time(),
-            'detecciones': detecciones
-        })
-        
-        # Mantener solo el historial reciente
-        tiempo_limite = time.time() - (self.config.get('tiempo_persistencia_ms', 3000) / 1000.0)
-        self.detecciones_historial = [h for h in self.detecciones_historial if h['timestamp'] > tiempo_limite]
-        
-        if len(self.detecciones_historial) < 2:
-            return detecciones
-        
-        # Filtrar detecciones que aparecen consistentemente
-        detecciones_estables = []
-        for deteccion in detecciones:
-            apariciones = 0
-            for historial in self.detecciones_historial:
-                for det_hist in historial['detecciones']:
-                    # Verificar si es la misma persona (misma área)
-                    if self.es_misma_persona(deteccion, det_hist):
-                        apariciones += 1
-                        break
-            
-            # Una detección es estable si aparece en al menos 2 frames
-            if apariciones >= 2:
-                detecciones_estables.append(deteccion)
-                print(f"🔒 Detección estable: conf={deteccion.confianza:.3f}, apariciones={apariciones}")
-        
-        return detecciones_estables
-    
-    def es_misma_persona(self, det1, det2):
-        """Determina si dos detecciones son de la misma persona"""
-        # Calcular IoU
-        iou = self.calcular_iou(det1.bbox, det2.bbox)
-        
-        # Calcular distancia entre centros
-        distancia = np.sqrt(
-            (det1.centro[0] - det2.centro[0])**2 +
-            (det1.centro[1] - det2.centro[1])**2
-        )
-        
-        # Es la misma persona si IoU > 0.3 o distancia < 30px
-        return iou > 0.3 or distancia < 30
-    
     def aplicar_nms(self, detecciones):
         """Aplica Non-Maximum Suppression para eliminar detecciones duplicadas"""
         if len(detecciones) <= 1:
@@ -433,9 +448,37 @@ class CamaraIMX500:
         x1, y1, x2, y2 = self.config['roi_puerta']
         return x1 <= x <= x2 and y1 <= y <= y2
     
+    def obtener_metricas(self):
+        """Obtiene las métricas del procesamiento"""
+        return {
+            'fps_captura': self.fps_captura,
+            'fps_inferencia': self.fps_inferencia,
+            'frame_actual': self.frame_actual is not None,
+            'timestamp_ultimo_frame': self.timestamp_ultimo_frame,
+            'cola_frames': self.cola_frames.qsize(),
+            'cola_detecciones': self.cola_detecciones.qsize()
+        }
+    
+    def obtener_detecciones_actuales(self):
+        """Obtiene las detecciones actuales para visualización"""
+        return self.detecciones_actuales
+    
+    def obtener_tracker(self):
+        """Obtiene el tracker para acceso a contadores"""
+        return self.tracker
+    
     def cleanup(self):
-        """Limpia recursos de la cámara"""
-        if self.proceso_camara:
+        """Limpia recursos del procesador"""
+        self.detenido = True
+        
+        # Esperar threads
+        if hasattr(self, 'thread_captura'):
+            self.thread_captura.join(timeout=2)
+        if hasattr(self, 'thread_procesamiento'):
+            self.thread_procesamiento.join(timeout=2)
+        
+        # Limpiar proceso de cámara
+        if hasattr(self, 'proceso_camara') and self.proceso_camara:
             self.proceso_camara.terminate()
             self.proceso_camara.wait()
 
@@ -540,8 +583,8 @@ class TrackerPersonas:
         
         for tid, track in self.tracks.items():
             tiempo_inactivo = (tiempo_actual - track.ultimo_timestamp) * 1000  # ms
-            
-            if tiempo_inactivo > self.config['track_lost_ms']:
+            if tiempo_inactivo > max(self.config.get('track_lost_ms', 1000), 2000):  # Aumentar persistencia mínima a 2s
+                print(f"[DEBUG] Eliminando track {tid} por inactividad ({tiempo_inactivo:.0f} ms)")
                 tracks_a_eliminar.append(tid)
         
         for tid in tracks_a_eliminar:
@@ -691,7 +734,7 @@ class TrackerPersonas:
             del self.eventos_recientes[tid]
 
 class ServidorStreaming:
-    """Servidor web Flask para streaming en vivo"""
+    """Servidor web Flask para streaming en vivo con visualización dinámica"""
     
     def __init__(self, config):
         self.config = config
@@ -700,12 +743,18 @@ class ServidorStreaming:
         # CORS(self.app)
         
         # Inicializar componentes
-        self.camara = CamaraIMX500(config)
-        self.tracker = TrackerPersonas(config)
+        self.procesador = ProcesadorSegundoPlano(config)
+        self.tracker = self.procesador.obtener_tracker() # Obtener el tracker del procesador
         
         # Estado del sistema
         self.inicio_tiempo = time.time()
         self.frame_count = 0
+        
+        # Control de visualización
+        self.visualizacion_activa = True  # Por defecto activa
+        self.ultimo_frame_visualizacion = None
+        self.ultimas_detecciones_visualizacion = []
+        self.ultimas_personas_visualizacion = {}
         
         # Configurar rutas
         self.configurar_rutas()
@@ -770,58 +819,75 @@ class ServidorStreaming:
                 'mensaje': 'Línea de cruce ' + ('activada' if self.config['mostrar_linea_cruce'] else 'desactivada')
             })
         
+        @self.app.route('/toggle_visualizacion', methods=['POST'])
+        def toggle_visualizacion():
+            """Toggle para activar/desactivar visualización de cámara"""
+            self.visualizacion_activa = not self.visualizacion_activa
+            return jsonify({
+                'visualizacion_activa': self.visualizacion_activa,
+                'mensaje': 'Visualización de cámara ' + ('activada' if self.visualizacion_activa else 'desactivada')
+            })
+        
+        @self.app.route('/estado_visualizacion')
+        def estado_visualizacion():
+            """Obtiene el estado actual de la visualización"""
+            return jsonify({
+                'visualizacion_activa': self.visualizacion_activa,
+                'procesamiento_activo': True,  # El procesamiento siempre está activo
+                'timestamp': time.time()
+            })
+        
         @self.app.route('/health')
         def health():
             """Estado de salud del sistema"""
             return jsonify({
                 'status': 'ok',
                 'timestamp': time.time(),
-                'camara_activa': self.camara.proceso_camara is not None,
+                'camara_activa': self.procesador.proceso_camara is not None,
+                'procesamiento_activo': True,
+                'visualizacion_activa': self.visualizacion_activa,
                 'frame_count': self.frame_count,
                 'uptime': time.time() - self.inicio_tiempo
             })
     
     def generar_stream(self):
-        """Genera el stream MJPEG en vivo optimizado para Raspberry Pi"""
+        """Genera el stream MJPEG en vivo optimizado para Raspberry Pi con control de visualización"""
         frame_counter = 0  # Contador de frames para procesar detecciones
-        detecciones_cache = []  # Cache de detecciones para frames intermedios
-        personas_cache = {}  # Cache de tracking para frames intermedios
         
         while True:
             try:
-                # Leer frame de la cámara
-                frame = self.camara.leer_frame()
+                # Verificar si la visualización está activa
+                if not self.visualizacion_activa:
+                    # Si la visualización está desactivada, solo mantener el procesamiento activo
+                    time.sleep(0.1)
+                    continue
+                
+                # Obtener datos del procesador
+                try:
+                    datos_visualizacion = self.procesador.cola_detecciones.get(timeout=0.1)
+                    frame = datos_visualizacion['frame']
+                    detecciones = datos_visualizacion['detecciones']
+                    personas_actuales = datos_visualizacion['personas_actuales']
+                    
+                    # Actualizar datos de visualización
+                    self.ultimo_frame_visualizacion = frame
+                    self.ultimas_detecciones_visualizacion = detecciones
+                    self.ultimas_personas_visualizacion = personas_actuales
+                    
+                except queue.Empty:
+                    # Si no hay datos nuevos, usar los últimos disponibles
+                    if self.ultimo_frame_visualizacion is not None:
+                        frame = self.ultimo_frame_visualizacion
+                        detecciones = self.ultimas_detecciones_visualizacion
+                        personas_actuales = self.ultimas_personas_visualizacion
+                    else:
+                        # Generar frame de placeholder
+                        frame = self.generar_frame_placeholder()
+                        detecciones = []
+                        personas_actuales = {}
                 
                 if frame is not None:
                     frame_counter += 1
-                    
-                    # Procesar detecciones cada N frames para optimizar rendimiento y estabilidad
-                    procesar_detecciones = frame_counter % self.config.get('procesar_cada_n_frames', 2) == 0
-                    
-                    # Sistema de cache inteligente: procesar más frames si no hay detecciones
-                    if procesar_detecciones:
-                        # Procesar detecciones
-                        detecciones = self.camara.simular_detecciones(frame)
-                        detecciones_cache = detecciones
-                        
-                        # Actualizar tracking
-                        personas_actuales = self.tracker.actualizar_tracking(detecciones)
-                        personas_cache = personas_actuales
-                        
-                        # Log reducido para optimizar rendimiento
-                        if frame_counter % 60 == 0:  # Log cada 60 frames para reducir ruido
-                            print(f"🔄 Frame {frame_counter}: {len(detecciones)} personas, {len(personas_actuales)} tracks")
-                    else:
-                        # Usar cache de detecciones y tracking
-                        detecciones = detecciones_cache
-                        personas_actuales = personas_cache
-                        
-                        # Si no hay detecciones en cache, procesar ocasionalmente para mantener precisión
-                        if len(detecciones_cache) == 0 and frame_counter % 5 == 0:
-                            detecciones = self.camara.simular_detecciones(frame)
-                            detecciones_cache = detecciones
-                            personas_actuales = self.tracker.actualizar_tracking(detecciones)
-                            personas_cache = personas_actuales
                     
                     # Dibujar anotaciones simplificadas
                     frame_anotado = self.dibujar_anotaciones(frame, detecciones, personas_actuales)
@@ -853,6 +919,29 @@ class ServidorStreaming:
                 print(f"❌ Error en stream: {e}")
                 time.sleep(0.1)
     
+    def generar_frame_placeholder(self):
+        """Genera un frame de placeholder cuando la visualización está desactivada"""
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        # Texto de estado
+        cv2.putText(frame, "VISUALIZACION DESACTIVADA", (120, 200), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, "Procesamiento activo en segundo plano", (100, 250), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        
+        # Dibujar icono de cámara
+        cv2.circle(frame, (320, 100), 50, (0, 255, 255), 3)
+        cv2.circle(frame, (320, 100), 20, (0, 255, 255), -1)
+        
+        # Mostrar métricas básicas
+        metricas = self.procesador.obtener_metricas()
+        cv2.putText(frame, f"FPS: {metricas['fps_captura']:.1f}", (50, 350), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(frame, f"Procesamiento: Activo", (50, 380), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
+        return frame
+    
     def dibujar_anotaciones(self, frame, detecciones, personas_actuales):
         """Dibuja anotaciones mínimas: solo línea de cruce y puntos de personas"""
         frame_anotado = frame.copy()
@@ -879,10 +968,13 @@ class ServidorStreaming:
         cv2.rectangle(frame, (frame.shape[1]-310, 10), (frame.shape[1]-10, 100), (0, 0, 0), -1)
         cv2.rectangle(frame, (frame.shape[1]-310, 10), (frame.shape[1]-10, 100), (255, 255, 255), 2)
         
+        # Obtener métricas del procesador
+        metricas_procesador = self.procesador.obtener_metricas()
+        
         # Métricas
-        cv2.putText(frame, f'FPS Captura: {self.camara.fps_captura:.1f}', (frame.shape[1]-300, 35), 
+        cv2.putText(frame, f'FPS Captura: {metricas_procesador["fps_captura"]:.1f}', (frame.shape[1]-300, 35), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, f'FPS Inferencia: {self.camara.fps_inferencia:.1f}', (frame.shape[1]-300, 60), 
+        cv2.putText(frame, f'FPS Inferencia: {metricas_procesador["fps_inferencia"]:.1f}', (frame.shape[1]-300, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         cv2.putText(frame, f'Frames: {self.frame_count}', (frame.shape[1]-300, 85), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -901,12 +993,15 @@ class ServidorStreaming:
         except:
             pass
         
+        # Obtener métricas del procesador
+        metricas_procesador = self.procesador.obtener_metricas()
+        
         return {
             'timestamp': time.time(),
             'uptime': time.time() - self.inicio_tiempo,
             'frame_count': self.frame_count,
-            'fps_captura': self.camara.fps_captura,
-            'fps_inferencia': self.camara.fps_inferencia,
+            'fps_captura': metricas_procesador['fps_captura'],
+            'fps_inferencia': metricas_procesador['fps_inferencia'],
             'contador_entradas': self.tracker.contador_entradas,
             'contador_salidas': self.tracker.contador_salidas,
             'personas_en_habitacion': self.tracker.personas_en_habitacion,
@@ -914,7 +1009,11 @@ class ServidorStreaming:
             'cpu': cpu_percent,
             'memoria': memoria.percent,
             'temperatura': temperatura,
-            'camara_activa': self.camara.proceso_camara is not None
+            'camara_activa': self.procesador.proceso_camara is not None,
+            'procesamiento_activo': True,
+            'visualizacion_activa': self.visualizacion_activa,
+            'cola_frames': metricas_procesador['cola_frames'],
+            'cola_detecciones': metricas_procesador['cola_detecciones']
         }
     
     def get_html_template(self):
@@ -1020,6 +1119,7 @@ class ServidorStreaming:
                     <button onclick="location.reload()">🔄 Recargar</button>
                     <button onclick="window.open('/metrics', '_blank')">📊 Ver Métricas JSON</button>
                     <button onclick="window.open('/counts', '_blank')">🔢 Ver Contadores</button>
+                    <button onclick="toggleVisualizacion()" id="btnVisualizacion">📹 Desactivar Visualización</button>
                     <button onclick="togglePuntosPersonas()">👁️ Toggle Puntos Personas</button>
                     <button onclick="toggleLineaCruce()">📏 Toggle Línea Cruce</button>
                 </div>
@@ -1065,6 +1165,14 @@ class ServidorStreaming:
                         <div class="metric-value" id="temperatura">-</div>
                         <div class="metric-label">🌡️ Temperatura</div>
                     </div>
+                    <div class="metric-card">
+                        <div class="metric-value" id="visualizacion">-</div>
+                        <div class="metric-label">📹 Visualización</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value" id="procesamiento">-</div>
+                        <div class="metric-label">🧠 Procesamiento</div>
+                    </div>
                 </div>
             </div>
             
@@ -1084,6 +1192,8 @@ class ServidorStreaming:
                             document.getElementById('cpu').textContent = data.cpu.toFixed(1);
                             document.getElementById('memoria').textContent = data.memoria.toFixed(1);
                             document.getElementById('temperatura').textContent = data.temperatura ? data.temperatura.toFixed(1) + '°C' : 'N/A';
+                            document.getElementById('visualizacion').textContent = data.visualizacion_activa ? 'ON' : 'OFF';
+                            document.getElementById('procesamiento').textContent = data.procesamiento_activo ? 'ON' : 'OFF';
                         })
                         .catch(error => console.error('Error:', error));
                 }
@@ -1112,6 +1222,49 @@ class ServidorStreaming:
                         })
                         .catch(error => console.error('Error:', error));
                 }
+                
+                function toggleVisualizacion() {
+                    fetch('/toggle_visualizacion', {method: 'POST'})
+                        .then(response => response.json())
+                        .then(data => {
+                            const btn = document.getElementById('btnVisualizacion');
+                            if (data.visualizacion_activa) {
+                                btn.textContent = '📹 Desactivar Visualización';
+                                btn.style.background = '#00ff88';
+                            } else {
+                                btn.textContent = '📹 Activar Visualización';
+                                btn.style.background = '#ff8800';
+                            }
+                            console.log('Visualización:', data.visualizacion_activa ? 'Activada' : 'Desactivada');
+                            
+                            // Recargar la imagen del stream si es necesario
+                            const streamImg = document.querySelector('.stream-image');
+                            if (streamImg) {
+                                streamImg.src = '/stream?' + new Date().getTime();
+                            }
+                        })
+                        .catch(error => console.error('Error:', error));
+                }
+                
+                // Verificar estado inicial de visualización
+                function verificarEstadoVisualizacion() {
+                    fetch('/estado_visualizacion')
+                        .then(response => response.json())
+                        .then(data => {
+                            const btn = document.getElementById('btnVisualizacion');
+                            if (data.visualizacion_activa) {
+                                btn.textContent = '📹 Desactivar Visualización';
+                                btn.style.background = '#00ff88';
+                            } else {
+                                btn.textContent = '📹 Activar Visualización';
+                                btn.style.background = '#ff8800';
+                            }
+                        })
+                        .catch(error => console.error('Error:', error));
+                }
+                
+                // Verificar estado al cargar la página
+                verificarEstadoVisualizacion();
             </script>
         </body>
         </html>
@@ -1128,6 +1281,12 @@ class ServidorStreaming:
         print(f"🌐 Servidor: http://{host}:{port}")
         print(f"📹 Streaming: http://{host}:{port}/stream")
         print(f"📊 Métricas: http://{host}:{port}/metrics")
+        print(f"🎛️ Control visualización: /toggle_visualizacion")
+        print(f"📊 Estado visualización: /estado_visualizacion")
+        print("=" * 60)
+        print("💡 NUEVO: Procesamiento en segundo plano independiente de visualización")
+        print("💡 NUEVO: Control dinámico de visualización sin reiniciar sistema")
+        print("💡 NUEVO: Optimización de CPU cuando visualización está desactivada")
         print("=" * 60)
         
         try:
@@ -1140,7 +1299,7 @@ class ServidorStreaming:
     def cleanup(self):
         """Limpia recursos del servidor"""
         print("🧹 Limpiando recursos...")
-        self.camara.cleanup()
+        self.procesador.cleanup()
         print("✅ Recursos limpiados")
 
 def main():
