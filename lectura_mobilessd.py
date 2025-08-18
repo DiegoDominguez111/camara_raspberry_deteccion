@@ -108,6 +108,7 @@ def procesar_inferencia(line):
     cx = x + w // 2
     cy = y + h // 2
     tid = asignar_id(cx, cy)
+    # La cámara está invertida horizontalmente, por eso invertimos la lógica
     side = "L" if cx < LINE_X_SENSOR else "R"
 
     with lock:
@@ -318,9 +319,57 @@ HTML_TEMPLATE="""
         }
         .container { 
             display: flex; 
+            flex-direction: column;
             height: 100vh; 
             background: rgba(255, 255, 255, 0.95);
             backdrop-filter: blur(10px);
+        }
+        
+        /* Barra superior */
+        .topbar {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            color: white;
+        }
+        .topbar h2 {
+            margin: 0;
+            color: #ecf0f1;
+            font-size: 1.3em;
+        }
+        .topbar-controls {
+            display: flex;
+            gap: 15px;
+        }
+        .topbar-btn {
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .topbar-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            background: linear-gradient(135deg, #2980b9, #1f5f8b);
+        }
+        .topbar-btn.danger {
+            background: linear-gradient(135deg, #e74c3c, #c0392b);
+        }
+        .topbar-btn.danger:hover {
+            background: linear-gradient(135deg, #c0392b, #a93226);
+        }
+        
+        .main-content {
+            display: flex;
+            flex: 1;
         }
 
         /* Barra lateral izquierda */
@@ -456,46 +505,56 @@ HTML_TEMPLATE="""
 </head>
 <body>
 <div class="container">
-    <div class="sidebar">
-        <h1>📊 Sistema de Monitoreo</h1>
-        <div class="stat-box activos">
-            <span class="number" id="activos">0</span>
-            <span class="label">Personas Activas</span>
-        </div>
-        <div class="stat-box habitacion">
-            <span class="number" id="habitacion">0</span>
-            <span class="label">En Habitación</span>
-        </div>
-        <div class="stat-box entradas">
-            <span class="number" id="entradas">0</span>
-            <span class="label">Entradas</span>
-        </div>
-        <div class="stat-box salidas">
-            <span class="number" id="salidas">0</span>
-            <span class="label">Salidas</span>
-        </div>
-        <div class="stat-box cpu">
-            <span class="number" id="cpu_usage">0%</span>
-            <span class="label">CPU Uso</span>
-        </div>
-        <div class="stat-box ram">
-            <span class="number" id="ram_usage">0%</span>
-            <span class="label">RAM Uso</span>
-        </div>
-        <div class="stat-box temp">
-            <span class="number" id="cpu_temp">0°C</span>
-            <span class="label">CPU Temp</span>
-        </div>
-        
-        <div class="flow-control">
-            <div class="flow-info">
-                <span id="flow-direction-text">Dirección: Normal</span>
-            </div>
-            <button id="toggle-flow-btn" class="flow-toggle-btn">
+    <div class="topbar">
+        <h2>🎥 Sistema de Monitoreo de Personas</h2>
+        <div class="topbar-controls">
+            <button id="toggle-flow-btn" class="topbar-btn">
                 🔄 Cambiar Dirección
+            </button>
+            <button id="reset-stats-btn" class="topbar-btn danger">
+                🗑️ Reiniciar Estadísticas
             </button>
         </div>
     </div>
+    
+    <div class="main-content">
+        <div class="sidebar">
+            <h1>📊 Estadísticas</h1>
+            <div class="stat-box activos">
+                <span class="number" id="activos">0</span>
+                <span class="label">Personas Activas</span>
+            </div>
+            <div class="stat-box habitacion">
+                <span class="number" id="habitacion">0</span>
+                <span class="label">En Habitación</span>
+            </div>
+            <div class="stat-box entradas">
+                <span class="number" id="entradas">0</span>
+                <span class="label">Entradas</span>
+            </div>
+            <div class="stat-box salidas">
+                <span class="number" id="salidas">0</span>
+                <span class="label">Salidas</span>
+            </div>
+            <div class="stat-box cpu">
+                <span class="number" id="cpu_usage">0%</span>
+                <span class="label">CPU Uso</span>
+            </div>
+            <div class="stat-box ram">
+                <span class="number" id="ram_usage">0%</span>
+                <span class="label">RAM Uso</span>
+            </div>
+            <div class="stat-box temp">
+                <span class="number" id="cpu_temp">0%</span>
+                <span class="label">CPU Temp</span>
+            </div>
+            
+            <div class="flow-control">
+                <div class="flow-info">
+                    <span id="flow-direction-text">Dirección: Normal</span>
+                </div>
+            </div>
+        </div>
 
     <div class="main">
         <div class="visualization-container">
@@ -507,6 +566,7 @@ HTML_TEMPLATE="""
             <div class="visualization-title">🎥 Video en Tiempo Real</div>
             <img id="videoFeed" class="video-feed" width="640" height="480" src="/video_feed" />
         </div>
+    </div>
     </div>
 </div>
 
@@ -531,42 +591,52 @@ function drawCanvas(tracksData) {
     // Indicadores de dirección del flujo
     const flowDirection = document.getElementById('flow-direction-text').textContent.includes('Normal');
     
-    // Lado izquierdo
+    // Lado izquierdo (L)
     ctx.fillStyle = flowDirection ? '#2ecc71' : '#e67e22';
     ctx.font = 'bold 16px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     
     if (flowDirection) {
-        // Dirección normal: L->R = Entrada
-        ctx.fillText('← ENTRADA', canvas.width * 0.25, 30);
-        ctx.fillText('SALIDA →', canvas.width * 0.75, 30);
+        // Dirección normal: L->R = Entrada, R->L = Salida
+        ctx.fillText('LADO L', canvas.width * 0.25, 30);
+        ctx.fillText('LADO R', canvas.width * 0.75, 30);
+        
+        // Explicación de la lógica
+        ctx.font = '12px Arial';
+        ctx.fillText('L→R = ENTRADA', canvas.width * 0.25, 50);
+        ctx.fillText('R→L = SALIDA', canvas.width * 0.75, 50);
     } else {
-        // Dirección invertida: L->R = Salida
-        ctx.fillText('← SALIDA', canvas.width * 0.25, 30);
-        ctx.fillText('ENTRADA →', canvas.width * 0.75, 30);
+        // Dirección invertida: L->R = Salida, R->L = Entrada
+        ctx.fillText('LADO L', canvas.width * 0.25, 30);
+        ctx.fillText('LADO R', canvas.width * 0.75, 30);
+        
+        // Explicación de la lógica
+        ctx.font = '12px Arial';
+        ctx.fillText('L→R = SALIDA', canvas.width * 0.25, 50);
+        ctx.fillText('R→L = ENTRADA', canvas.width * 0.75, 50);
     }
     
-    // Flechas de dirección
-    ctx.strokeStyle = flowDirection ? '#2ecc71' : '#e67e22';
+    // Flechas de dirección física (siempre muestran L→R y R→L)
+    ctx.strokeStyle = '#34495e';
     ctx.lineWidth = 2;
     
-    // Flecha izquierda
+    // Flecha L→R (izquierda a derecha)
     ctx.beginPath();
     ctx.moveTo(canvas.width * 0.25 + 20, 30);
-    ctx.lineTo(canvas.width * 0.25 - 20, 30);
-    ctx.lineTo(canvas.width * 0.25 - 15, 25);
-    ctx.moveTo(canvas.width * 0.25 - 20, 30);
-    ctx.lineTo(canvas.width * 0.25 - 15, 35);
+    ctx.lineTo(canvas.width * 0.25 + 40, 30);
+    ctx.lineTo(canvas.width * 0.25 + 35, 25);
+    ctx.moveTo(canvas.width * 0.25 + 40, 30);
+    ctx.lineTo(canvas.width * 0.25 + 35, 35);
     ctx.stroke();
     
-    // Flecha derecha
+    // Flecha R→L (derecha a izquierda)
     ctx.beginPath();
     ctx.moveTo(canvas.width * 0.75 - 20, 30);
-    ctx.lineTo(canvas.width * 0.75 + 20, 30);
-    ctx.lineTo(canvas.width * 0.75 + 15, 25);
-    ctx.moveTo(canvas.width * 0.75 + 20, 30);
-    ctx.lineTo(canvas.width * 0.75 + 15, 35);
+    ctx.lineTo(canvas.width * 0.75 - 40, 30);
+    ctx.lineTo(canvas.width * 0.75 - 35, 25);
+    ctx.moveTo(canvas.width * 0.75 - 40, 30);
+    ctx.lineTo(canvas.width * 0.75 - 35, 35);
     ctx.stroke();
 
     // Dibujar tracks con IDs
@@ -676,7 +746,7 @@ async function toggleFlowDirection() {
             
             setTimeout(() => {
                 btn.textContent = originalText;
-                btn.style.background = 'linear-gradient(135deg, #9b59b6, #8e44ad)';
+                btn.style.background = 'linear-gradient(135deg, #3498db, #2980b9)';
             }, 2000);
             
             console.log('Dirección del flujo cambiada a:', data.direction);
@@ -686,11 +756,50 @@ async function toggleFlowDirection() {
     }
 }
 
-// Agregar evento al botón
+// Función para reiniciar estadísticas
+async function resetStats() {
+    if (confirm('¿Estás seguro de que quieres reiniciar todas las estadísticas?')) {
+        try {
+            const response = await fetch('/reset_stats');
+            const data = await response.json();
+            
+            if (data.success) {
+                // Actualizar el texto del botón temporalmente
+                const btn = document.getElementById('reset-stats-btn');
+                const originalText = btn.textContent;
+                btn.textContent = '✅ Reiniciado!';
+                btn.style.background = 'linear-gradient(135deg, #2ecc71, #27ae60)';
+                
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = 'linear-gradient(135deg, #e74c3c, #c0392b)';
+                }, 2000);
+                
+                console.log('Estadísticas reiniciadas:', data.message);
+                
+                // Actualizar inmediatamente las métricas en pantalla
+                document.getElementById('activos').textContent = '0';
+                document.getElementById('habitacion').textContent = '0';
+                document.getElementById('entradas').textContent = '0';
+                document.getElementById('salidas').textContent = '0';
+            }
+        } catch (e) {
+            console.error('Error reiniciando estadísticas:', e);
+        }
+    }
+}
+
+// Agregar eventos a los botones
 document.addEventListener('DOMContentLoaded', () => {
     const toggleBtn = document.getElementById('toggle-flow-btn');
+    const resetBtn = document.getElementById('reset-stats-btn');
+    
     if (toggleBtn) {
         toggleBtn.addEventListener('click', toggleFlowDirection);
+    }
+    
+    if (resetBtn) {
+        resetBtn.addEventListener('click', resetStats);
     }
 });
 
@@ -743,6 +852,20 @@ def toggle_flow_direction():
     print(f"🔄 Valor de FLOW_DIRECTION_NORMAL: {FLOW_DIRECTION_NORMAL}", file=sys.stderr)
     
     return jsonify({"success": True, "direction": new_direction})
+
+
+@app.route("/reset_stats")
+def reset_stats():
+    global total_in, total_out, personas_habitacion, tracks, next_id
+    with lock:
+        total_in = 0
+        total_out = 0
+        personas_habitacion = 0
+        tracks = {}
+        next_id = 0
+        print("🔄 Estadísticas reiniciadas", file=sys.stderr)
+    
+    return jsonify({"success": True, "message": "Estadísticas reiniciadas"})
 
 
 def generate_video():
