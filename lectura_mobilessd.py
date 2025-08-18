@@ -40,6 +40,7 @@ tracks = {}
 next_id = 0
 total_in = 0
 total_out = 0
+personas_habitacion = 0  # Contador de personas en habitación
 last_update = time.time()
 lock = threading.Lock()
 latest_frame = None  # Para video feed
@@ -87,7 +88,7 @@ def limpiar_tracks():
 
 def procesar_inferencia(line):
     """Procesa una línea de inferencia y actualiza los tracks y conteos"""
-    global total_in, total_out, last_update
+    global total_in, total_out, personas_habitacion, last_update
     m = DET_RE.search(line)
     if not m:
         return
@@ -111,8 +112,10 @@ def procesar_inferencia(line):
         if last_side != "?" and last_side != side:
             if last_side == "L" and side == "R":
                 total_in += 1
+                personas_habitacion += 1  # Incrementar personas en habitación
             elif last_side == "R" and side == "L":
                 total_out += 1
+                personas_habitacion = max(0, personas_habitacion - 1)  # Decrementar, mínimo 0
             last_update = time.time()
         tracks[tid]["last_side"] = side
         tracks[tid]["last_seen"] = time.time()
@@ -342,6 +345,7 @@ HTML_TEMPLATE="""
             letter-spacing: 1px;
         }
         .activos { background: linear-gradient(135deg, #3498db, #2980b9); color: white; }
+        .habitacion { background: linear-gradient(135deg, #1abc9c, #16a085); color: white; }
         .entradas { background: linear-gradient(135deg, #2ecc71, #27ae60); color: white; }
         .salidas { background: linear-gradient(135deg, #e67e22, #d35400); color: white; }
         .cpu { background: linear-gradient(135deg, #e74c3c, #c0392b); color: white; }
@@ -405,6 +409,10 @@ HTML_TEMPLATE="""
         <div class="stat-box activos">
             <span class="number" id="activos">0</span>
             <span class="label">Personas Activas</span>
+        </div>
+        <div class="stat-box habitacion">
+            <span class="number" id="habitacion">0</span>
+            <span class="label">En Habitación</span>
         </div>
         <div class="stat-box entradas">
             <span class="number" id="entradas">0</span>
@@ -507,6 +515,7 @@ async function updateCanvasWithFrame() {
 
         // Actualizar métricas con animación
         updateMetricWithAnimation('activos', data.activos);
+        updateMetricWithAnimation('habitacion', data.habitacion);
         updateMetricWithAnimation('entradas', data.entradas);
         updateMetricWithAnimation('salidas', data.salidas);
         updateMetricWithAnimation('cpu_usage', data.cpu_usage.toFixed(1) + '%');
@@ -567,6 +576,7 @@ def status():
         return jsonify(
             {
                 "activos": len(tracks),
+                "habitacion": personas_habitacion,
                 "entradas": total_in,
                 "salidas": total_out,
                 "tracks_activos": tracks_pos,
