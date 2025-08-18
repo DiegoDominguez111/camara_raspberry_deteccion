@@ -127,7 +127,7 @@ def rpicam_hello_reader():
 # ==========================
 app = Flask(__name__)
 
-# Template HTML para la página principal
+# HTML con canvas para simular cámara y dibujar tracks
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -145,6 +145,7 @@ HTML_TEMPLATE = """
         .number { font-size: 2.5em; font-weight: bold; display: block; }
         .label { font-size: 1.2em; margin-top: 5px; }
         .last-update { text-align: center; color: #666; margin-top: 20px; }
+        canvas { border: 2px solid #333; display: block; margin: 20px auto; }
         .auto-refresh { text-align: center; margin-top: 20px; }
         button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
         .refresh-btn { background: #2196f3; color: white; }
@@ -170,7 +171,9 @@ HTML_TEMPLATE = """
                 <span class="label">Salidas</span>
             </div>
         </div>
-        
+
+        <canvas id="camCanvas" width="640" height="480"></canvas>
+
         <div class="last-update">
             <p>Última actualización: <span id="last-update">-</span></p>
         </div>
@@ -184,38 +187,55 @@ HTML_TEMPLATE = """
 
     <script>
         let autoRefreshInterval;
-        
+
+        function drawCanvas(tracksData) {
+            const canvas = document.getElementById('camCanvas');
+            const ctx = canvas.getContext('2d');
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Línea de cruce
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(320, 0); 
+            ctx.lineTo(320, canvas.height);
+            ctx.stroke();
+
+            // Dibujar tracks activos
+            ctx.fillStyle = 'lime';
+            tracksData.forEach(track => {
+                ctx.beginPath();
+                ctx.arc(track.cx, track.cy, 8, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+        }
+
         function updateData() {
-            fetch('/counts')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('activos').textContent = data.activos;
-                    document.getElementById('entradas').textContent = data.entradas;
-                    document.getElementById('salidas').textContent = data.salidas;
-                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
-                })
-                .catch(error => console.error('Error:', error));
-        }
-        
-        function refreshData() {
-            updateData();
-        }
-        
+        fetch('/status')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('activos').textContent = data.activos;
+            document.getElementById('entradas').textContent = data.entradas;
+            document.getElementById('salidas').textContent = data.salidas;
+            document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+            // dibujar directamente usando los datos recibidos
+            drawCanvas(data.tracks_activos);
+        })
+        .catch(error => console.error('Error:', error));
+}
+
+
+        function refreshData() { updateData(); }
         function startAutoRefresh() {
             if (autoRefreshInterval) clearInterval(autoRefreshInterval);
             autoRefreshInterval = setInterval(updateData, 1000);
-            console.log('Auto-refresh iniciado');
         }
-        
         function stopAutoRefresh() {
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
-                autoRefreshInterval = null;
-                console.log('Auto-refresh detenido');
-            }
+            if (autoRefreshInterval) { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
         }
-        
-        // Cargar datos iniciales y iniciar auto-refresh
+
         updateData();
         startAutoRefresh();
     </script>
@@ -237,14 +257,16 @@ def counts():
             "timestamp": last_update
         })
 
+# endpoint /status
 @app.route("/status")
 def status():
     with lock:
+        tracks_pos = [{"cx": int(t["cx"]), "cy": int(t["cy"])} for t in tracks.values()]
         return jsonify({
             "activos": len(tracks),
             "entradas": total_in,
             "salidas": total_out,
-            "tracks_activos": list(tracks.keys()),
+            "tracks_activos": tracks_pos,
             "ultima_actualizacion": datetime.fromtimestamp(last_update).strftime("%Y-%m-%d %H:%M:%S")
         })
 
