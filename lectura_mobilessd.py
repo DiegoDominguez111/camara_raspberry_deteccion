@@ -45,6 +45,9 @@ last_update = time.time()
 lock = threading.Lock()
 latest_frame = None  # Para video feed
 
+# Configuración de dirección del flujo
+FLOW_DIRECTION_NORMAL = True  # True: L->R = Entrada, R->L = Salida | False: L->R = Salida, R->L = Entrada
+
 cpu_usage = 0.0
 ram_usage = 0.0
 cpu_temp = 0.0
@@ -108,14 +111,32 @@ def procesar_inferencia(line):
     side = "L" if cx < LINE_X_SENSOR else "R"
 
     with lock:
+        # Obtener el valor actual de la dirección del flujo de manera thread-safe
+        current_flow_direction = FLOW_DIRECTION_NORMAL
+        
         last_side = tracks[tid]["last_side"]
         if last_side != "?" and last_side != side:
-            if last_side == "L" and side == "R":
-                total_in += 1
-                personas_habitacion += 1  # Incrementar personas en habitación
-            elif last_side == "R" and side == "L":
-                total_out += 1
-                personas_habitacion = max(0, personas_habitacion - 1)  # Decrementar, mínimo 0
+            # Determinar entrada/salida basado en la dirección del flujo
+            if current_flow_direction:
+                # Dirección normal: L->R = Entrada, R->L = Salida
+                if last_side == "L" and side == "R":
+                    total_in += 1
+                    personas_habitacion += 1  # Incrementar personas en habitación
+                    print(f"🟢 ENTRADA detectada (L->R) - Total: {total_in}, En habitación: {personas_habitacion}", file=sys.stderr)
+                elif last_side == "R" and side == "L":
+                    total_out += 1
+                    personas_habitacion = max(0, personas_habitacion - 1)  # Decrementar, mínimo 0
+                    print(f"🔴 SALIDA detectada (R->L) - Total: {total_out}, En habitación: {personas_habitacion}", file=sys.stderr)
+            else:
+                # Dirección invertida: L->R = Salida, R->L = Entrada
+                if last_side == "L" and side == "R":
+                    total_out += 1
+                    personas_habitacion = max(0, personas_habitacion - 1)  # Decrementar, mínimo 0
+                    print(f"🔴 SALIDA detectada (L->R) [INVERTIDA] - Total: {total_out}, En habitación: {personas_habitacion}", file=sys.stderr)
+                elif last_side == "R" and side == "L":
+                    total_in += 1
+                    personas_habitacion += 1  # Incrementar personas en habitación
+                    print(f"🟢 ENTRADA detectada (R->L) [INVERTIDA] - Total: {total_in}, En habitación: {personas_habitacion}", file=sys.stderr)
             last_update = time.time()
         tracks[tid]["last_side"] = side
         tracks[tid]["last_seen"] = time.time()
@@ -351,6 +372,37 @@ HTML_TEMPLATE="""
         .cpu { background: linear-gradient(135deg, #e74c3c, #c0392b); color: white; }
         .ram { background: linear-gradient(135deg, #9b59b6, #8e44ad); color: white; }
         .temp { background: linear-gradient(135deg, #f1c40f, #f39c12); color: white; }
+        
+        /* Controles de flujo */
+        .flow-control {
+            margin-top: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            text-align: center;
+        }
+        .flow-info {
+            margin-bottom: 15px;
+            color: #ecf0f1;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+        .flow-toggle-btn {
+            background: linear-gradient(135deg, #9b59b6, #8e44ad);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        .flow-toggle-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+            background: linear-gradient(135deg, #8e44ad, #7d3c98);
+        }
 
         /* Contenedor derecho */
         .main {
@@ -434,6 +486,15 @@ HTML_TEMPLATE="""
             <span class="number" id="cpu_temp">0°C</span>
             <span class="label">CPU Temp</span>
         </div>
+        
+        <div class="flow-control">
+            <div class="flow-info">
+                <span id="flow-direction-text">Dirección: Normal</span>
+            </div>
+            <button id="toggle-flow-btn" class="flow-toggle-btn">
+                🔄 Cambiar Dirección
+            </button>
+        </div>
     </div>
 
     <div class="main">
@@ -466,6 +527,47 @@ function drawCanvas(tracksData) {
     ctx.lineTo(canvas.width/2, canvas.height);
     ctx.stroke();
     ctx.setLineDash([]);
+
+    // Indicadores de dirección del flujo
+    const flowDirection = document.getElementById('flow-direction-text').textContent.includes('Normal');
+    
+    // Lado izquierdo
+    ctx.fillStyle = flowDirection ? '#2ecc71' : '#e67e22';
+    ctx.font = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    if (flowDirection) {
+        // Dirección normal: L->R = Entrada
+        ctx.fillText('← ENTRADA', canvas.width * 0.25, 30);
+        ctx.fillText('SALIDA →', canvas.width * 0.75, 30);
+    } else {
+        // Dirección invertida: L->R = Salida
+        ctx.fillText('← SALIDA', canvas.width * 0.25, 30);
+        ctx.fillText('ENTRADA →', canvas.width * 0.75, 30);
+    }
+    
+    // Flechas de dirección
+    ctx.strokeStyle = flowDirection ? '#2ecc71' : '#e67e22';
+    ctx.lineWidth = 2;
+    
+    // Flecha izquierda
+    ctx.beginPath();
+    ctx.moveTo(canvas.width * 0.25 + 20, 30);
+    ctx.lineTo(canvas.width * 0.25 - 20, 30);
+    ctx.lineTo(canvas.width * 0.25 - 15, 25);
+    ctx.moveTo(canvas.width * 0.25 - 20, 30);
+    ctx.lineTo(canvas.width * 0.25 - 15, 35);
+    ctx.stroke();
+    
+    // Flecha derecha
+    ctx.beginPath();
+    ctx.moveTo(canvas.width * 0.75 - 20, 30);
+    ctx.lineTo(canvas.width * 0.75 + 20, 30);
+    ctx.lineTo(canvas.width * 0.75 + 15, 25);
+    ctx.moveTo(canvas.width * 0.75 + 20, 30);
+    ctx.lineTo(canvas.width * 0.75 + 15, 35);
+    ctx.stroke();
 
     // Dibujar tracks con IDs
     tracksData.forEach((track, index) => {
@@ -522,6 +624,12 @@ async function updateCanvasWithFrame() {
         updateMetricWithAnimation('ram_usage', data.ram_usage.toFixed(1) + '%');
         updateMetricWithAnimation('cpu_temp', data.cpu_temp.toFixed(1) + '°C');
 
+        // Actualizar indicador de dirección del flujo
+        if (data.flow_direction) {
+            const directionText = data.flow_direction === 'normal' ? 'Dirección: Normal' : 'Dirección: Invertida';
+            document.getElementById('flow-direction-text').textContent = directionText;
+        }
+
         // Escalar tracks para el canvas
         const scaledTracks = data.tracks_activos.map(t => {
             return {
@@ -553,6 +661,39 @@ function updateMetricWithAnimation(elementId, newValue) {
     }
 }
 
+// Función para cambiar la dirección del flujo
+async function toggleFlowDirection() {
+    try {
+        const response = await fetch('/toggle_flow_direction');
+        const data = await response.json();
+        
+        if (data.success) {
+            // Actualizar el texto del botón temporalmente
+            const btn = document.getElementById('toggle-flow-btn');
+            const originalText = btn.textContent;
+            btn.textContent = '✅ Cambiado!';
+            btn.style.background = 'linear-gradient(135deg, #2ecc71, #27ae60)';
+            
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.style.background = 'linear-gradient(135deg, #9b59b6, #8e44ad)';
+            }, 2000);
+            
+            console.log('Dirección del flujo cambiada a:', data.direction);
+        }
+    } catch (e) {
+        console.error('Error cambiando dirección del flujo:', e);
+    }
+}
+
+// Agregar evento al botón
+document.addEventListener('DOMContentLoaded', () => {
+    const toggleBtn = document.getElementById('toggle-flow-btn');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', toggleFlowDirection);
+    }
+});
+
 // Iniciar bucle cuando el video se cargue
 videoFeed.onload = () => {
     updateCanvasWithFrame();
@@ -583,11 +724,25 @@ def status():
                 "cpu_usage": cpu_usage,
                 "ram_usage": ram_usage,
                 "cpu_temp": cpu_temp,
+                "flow_direction": "normal" if FLOW_DIRECTION_NORMAL else "inverted",
                 "ultima_actualizacion": datetime.fromtimestamp(last_update).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
             }
         )
+
+
+@app.route("/toggle_flow_direction")
+def toggle_flow_direction():
+    global FLOW_DIRECTION_NORMAL
+    old_direction = "normal" if FLOW_DIRECTION_NORMAL else "invertida"
+    FLOW_DIRECTION_NORMAL = not FLOW_DIRECTION_NORMAL
+    new_direction = "normal" if FLOW_DIRECTION_NORMAL else "invertida"
+    
+    print(f"🔄 Dirección del flujo cambiada de '{old_direction}' a '{new_direction}'", file=sys.stderr)
+    print(f"🔄 Valor de FLOW_DIRECTION_NORMAL: {FLOW_DIRECTION_NORMAL}", file=sys.stderr)
+    
+    return jsonify({"success": True, "direction": new_direction})
 
 
 def generate_video():
