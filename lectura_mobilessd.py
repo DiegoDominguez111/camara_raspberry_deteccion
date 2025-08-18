@@ -286,43 +286,122 @@ HTML_TEMPLATE="""
     <title>Contador de Personas</title>
     <meta charset="utf-8">
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; background: #f0f0f0; }
-        .container { display: flex; height: 100vh; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+        }
+        .container { 
+            display: flex; 
+            height: 100vh; 
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+        }
 
         /* Barra lateral izquierda */
         .sidebar {
-            width: 220px;
-            background: #fff;
-            padding: 20px;
-            box-shadow: 2px 0 8px rgba(0,0,0,0.1);
+            width: 280px;
+            background: linear-gradient(180deg, #2c3e50 0%, #34495e 100%);
+            padding: 25px;
+            box-shadow: 4px 0 20px rgba(0,0,0,0.3);
             display: flex;
             flex-direction: column;
             justify-content: flex-start;
+            color: white;
         }
-        .stat-box { margin-bottom: 20px; padding: 15px; border-radius: 8px; text-align: center; }
-        .stat-box .number { font-size: 2em; font-weight: bold; display: block; }
-        .activos { background: #e3f2fd; color: #1976d2; }
-        .entradas { background: #e8f5e8; color: #388e3c; }
-        .salidas { background: #fff3e0; color: #f57c00; }
-        .cpu { background: #fce4ec; color: #d81b60; }
-        .ram { background: #ede7f6; color: #5e35b1; }
-        .temp { background: #fff9c4; color: #fbc02d; }
+        .sidebar h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #ecf0f1;
+            font-size: 1.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .stat-box { 
+            margin-bottom: 25px; 
+            padding: 20px; 
+            border-radius: 15px; 
+            text-align: center; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .stat-box:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        .stat-box .number { 
+            font-size: 2.2em; 
+            font-weight: bold; 
+            display: block; 
+            margin-bottom: 5px;
+        }
+        .stat-box .label { 
+            font-size: 0.9em; 
+            opacity: 0.9;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .activos { background: linear-gradient(135deg, #3498db, #2980b9); color: white; }
+        .entradas { background: linear-gradient(135deg, #2ecc71, #27ae60); color: white; }
+        .salidas { background: linear-gradient(135deg, #e67e22, #d35400); color: white; }
+        .cpu { background: linear-gradient(135deg, #e74c3c, #c0392b); color: white; }
+        .ram { background: linear-gradient(135deg, #9b59b6, #8e44ad); color: white; }
+        .temp { background: linear-gradient(135deg, #f1c40f, #f39c12); color: white; }
 
         /* Contenedor derecho */
         .main {
             flex-grow: 1;
-            padding: 20px;
+            padding: 30px;
             display: flex;
             flex-direction: column;
             align-items: center;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            position: relative;
         }
-        canvas { border: 2px solid #333; background: #000; margin-bottom: 20px; }
-        .video-feed { border: 2px solid #333; }
+        .main::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grain" width="100" height="100" patternUnits="userSpaceOnUse"><circle cx="25" cy="25" r="1" fill="%23ffffff" opacity="0.1"/><circle cx="75" cy="75" r="1" fill="%23ffffff" opacity="0.1"/><circle cx="50" cy="10" r="0.5" fill="%23ffffff" opacity="0.1"/></pattern></defs><rect width="100" height="100" fill="url(%23grain)"/></svg>');
+            pointer-events: none;
+        }
+        .visualization-container {
+            background: rgba(255, 255, 255, 0.9);
+            padding: 25px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .visualization-title {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #2c3e50;
+            font-size: 1.3em;
+            font-weight: 600;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        }
+        canvas { 
+            border: 3px solid #34495e; 
+            background: #000; 
+            margin-bottom: 20px; 
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        .video-feed { 
+            border: 3px solid #34495e; 
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="sidebar">
+        <h1>📊 Sistema de Monitoreo</h1>
         <div class="stat-box activos">
             <span class="number" id="activos">0</span>
             <span class="label">Personas Activas</span>
@@ -350,8 +429,15 @@ HTML_TEMPLATE="""
     </div>
 
     <div class="main">
-        <canvas id="camCanvas" width="640" height="480"></canvas>
-        <img id="videoFeed" class="video-feed" width="640" height="480" src="/video_feed" />
+        <div class="visualization-container">
+            <div class="visualization-title">🎯 Mapa de Posiciones</div>
+            <canvas id="camCanvas" width="640" height="480"></canvas>
+        </div>
+        
+        <div class="visualization-container">
+            <div class="visualization-title">🎥 Video en Tiempo Real</div>
+            <img id="videoFeed" class="video-feed" width="640" height="480" src="/video_feed" />
+        </div>
     </div>
 </div>
 
@@ -364,19 +450,52 @@ function drawCanvas(tracksData) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // Línea central
-    ctx.strokeStyle = 'red';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#e74c3c';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 5]);
     ctx.beginPath();
     ctx.moveTo(canvas.width/2, 0);
     ctx.lineTo(canvas.width/2, canvas.height);
     ctx.stroke();
+    ctx.setLineDash([]);
 
-    // Dibujar tracks
-    ctx.fillStyle = 'lime';
-    tracksData.forEach(track => {
+    // Dibujar tracks con IDs
+    tracksData.forEach((track, index) => {
+        // Círculo de la persona
+        ctx.fillStyle = '#3498db';
+        ctx.strokeStyle = '#2980b9';
+        ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(track.cx, track.cy, 10, 0, 2 * Math.PI);
+        ctx.arc(track.cx, track.cy, 12, 0, 2 * Math.PI);
         ctx.fill();
+        ctx.stroke();
+
+        // ID de la persona
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#2c3e50';
+        ctx.lineWidth = 1;
+        ctx.font = 'bold 14px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        const idText = `ID:${index + 1}`;
+        const textX = track.cx;
+        const textY = track.cy - 25;
+        
+        // Fondo del texto
+        const textMetrics = ctx.measureText(idText);
+        const textWidth = textMetrics.width;
+        const textHeight = 16;
+        
+        ctx.fillStyle = 'rgba(44, 62, 80, 0.9)';
+        ctx.fillRect(textX - textWidth/2 - 4, textY - textHeight/2 - 2, textWidth + 8, textHeight + 4);
+        
+        // Texto del ID
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#2c3e50';
+        ctx.lineWidth = 1;
+        ctx.fillText(idText, textX, textY);
+        ctx.strokeText(idText, textX, textY);
     });
 }
 
@@ -386,13 +505,13 @@ async function updateCanvasWithFrame() {
         const response = await fetch('/status');
         const data = await response.json();
 
-        // Actualizar métricas
-        document.getElementById('activos').textContent = data.activos;
-        document.getElementById('entradas').textContent = data.entradas;
-        document.getElementById('salidas').textContent = data.salidas;
-        document.getElementById('cpu_usage').textContent = data.cpu_usage.toFixed(1) + '%';
-        document.getElementById('ram_usage').textContent = data.ram_usage.toFixed(1) + '%';
-        document.getElementById('cpu_temp').textContent = data.cpu_temp.toFixed(1) + '°C';
+        // Actualizar métricas con animación
+        updateMetricWithAnimation('activos', data.activos);
+        updateMetricWithAnimation('entradas', data.entradas);
+        updateMetricWithAnimation('salidas', data.salidas);
+        updateMetricWithAnimation('cpu_usage', data.cpu_usage.toFixed(1) + '%');
+        updateMetricWithAnimation('ram_usage', data.ram_usage.toFixed(1) + '%');
+        updateMetricWithAnimation('cpu_temp', data.cpu_temp.toFixed(1) + '°C');
 
         // Escalar tracks para el canvas
         const scaledTracks = data.tracks_activos.map(t => {
@@ -409,6 +528,20 @@ async function updateCanvasWithFrame() {
 
     // Solicitar el siguiente frame
     requestAnimationFrame(updateCanvasWithFrame);
+}
+
+// Función para actualizar métricas con animación
+function updateMetricWithAnimation(elementId, newValue) {
+    const element = document.getElementById(elementId);
+    if (element && element.textContent !== newValue) {
+        element.style.transform = 'scale(1.1)';
+        element.style.transition = 'transform 0.2s ease';
+        element.textContent = newValue;
+        
+        setTimeout(() => {
+            element.style.transform = 'scale(1)';
+        }, 200);
+    }
 }
 
 // Iniciar bucle cuando el video se cargue
