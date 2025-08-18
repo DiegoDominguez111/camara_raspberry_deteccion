@@ -1,128 +1,279 @@
 #!/usr/bin/env python3
 import subprocess
-import re
+import threading
 import time
 import sys
-import math
+import re
+from flask import Flask, jsonify, render_template_string
+from datetime import datetime
 
-# Regex para el formato real del log:
-# [0] : person[0] (0.73) @ 275,447 1478x1072
-LINE_RE = re.compile(
+# ==========================
+# Configuración
+# ==========================
+LINE_X = 320  # línea virtual central (ajustable)
+STALE_TRACK_SEC = 2.0
+MAX_DIST_PX = 120
+
+DET_RE = re.compile(
     r"\[(\d+)\]\s*:\s*(\w+)\[\d+\]\s*\(([\d.]+)\)\s*@\s*(\d+),(\d+)\s+(\d+)x(\d+)"
 )
 
-# Configuración de la línea de cruce
-FRAME_WIDTH = 2028  # ajusta según tu cámara (ver salida "Viewfinder size chosen")
-LINE_X = FRAME_WIDTH // 2  # línea vertical en el centro
-MAX_DIST = 100  # distancia máxima para considerar que es la misma persona
-
-# Variables globales
-tracks = {}            # id -> {cx, cy, last_side, last_seen}
+# ==========================
+# Estado global
+# ==========================
+tracks = {}        # track_id -> {"cx", "cy", "last_side", "last_seen"}
 next_id = 0
-total_entradas = 0
-total_salidas = 0
+total_in = 0
+total_out = 0
+last_update = time.time()
+lock = threading.Lock()
 
-def launch():
+# ==========================
+# Funciones de tracking
+# ==========================
+def asignar_id(cx, cy):
+    global next_id
+    best_tid = None
+    best_dist = float("inf")
+    now = time.time()
+    with lock:
+        for tid, t in tracks.items():
+            dist = ((cx - t["cx"]) ** 2 + (cy - t["cy"]) ** 2) ** 0.5
+            if dist < best_dist and dist <= MAX_DIST_PX:
+                best_dist = dist
+                best_tid = tid
+
+        if best_tid is not None:
+            t = tracks[best_tid]
+            t["cx"] = cx
+            t["cy"] = cy
+            t["last_seen"] = now
+            return best_tid
+
+        # crear nuevo ID
+        tid = next_id
+        next_id += 1
+        tracks[tid] = {"cx": cx, "cy": cy, "last_side": "?", "last_seen": now}
+        return tid
+
+def limpiar_tracks():
+    now = time.time()
+    with lock:
+        to_del = [tid for tid, t in tracks.items() if now - t["last_seen"] > STALE_TRACK_SEC]
+        for tid in to_del:
+            del tracks[tid]
+
+# ==========================
+# Lectura rpicam-hello
+# ==========================
+def rpicam_hello_reader():
+    global total_in, total_out, last_update
     cmd = [
         "rpicam-hello",
         "-n", "-t", "0", "-v", "2",
         "--post-process-file", "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json",
         "--lores-width", "640", "--lores-height", "480"
     ]
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        universal_newlines=True
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
+    print("⏳ Esperando detecciones de rpicam-hello...", file=sys.stderr)
+    print("✅ Firmware cargado, comenzando detecciones...", file=sys.stderr)
 
-def asignar_id(cx, cy):
-    global next_id
-    for tid, data in tracks.items():
-        dist = math.hypot(cx - data["cx"], cy - data["cy"])
-        if dist < MAX_DIST:
-            # Actualizamos el track existente
-            tracks[tid]["cx"] = cx
-            tracks[tid]["cy"] = cy
+    while True:
+        line = proc.stderr.readline()
+        if not line:
+            time.sleep(0.01)
+            continue
+        line = line.strip()
+        m = DET_RE.search(line)
+        if not m:
+            continue
+        label = m.group(2).lower()
+        conf = float(m.group(3))
+        x = int(m.group(4))
+        y = int(m.group(5))
+        w = int(m.group(6))
+        h = int(m.group(7))
+        if label != "person" or conf < 0.5:
+            continue
+        cx = x + w // 2
+        cy = y + h // 2
+        tid = asignar_id(cx, cy)
+        side = "L" if cx < LINE_X else "R"
+        
+        with lock:
+            last_side = tracks[tid]["last_side"]
+            if last_side != "?" and last_side != side:
+                if last_side == "L" and side == "R":
+                    total_in += 1
+                    print(f"🚶 ENTRADA detectada! Total entradas: {total_in}")
+                elif last_side == "R" and side == "L":
+                    total_out += 1
+                    print(f"🚶 SALIDA detectada! Total salidas: {total_out}")
+                last_update = time.time()
+            
+            tracks[tid]["last_side"] = side
             tracks[tid]["last_seen"] = time.time()
-            return tid
-    # Si no coincidió con ninguno, creamos nuevo
-    tid = next_id
-    next_id += 1
-    tracks[tid] = {"cx": cx, "cy": cy, "last_seen": time.time(), "last_side": "?"}
-    return tid
+        
+        limpiar_tracks()
 
-def limpiar_tracks():
-    # Eliminamos tracks viejos que no se actualizan hace >2s
-    ahora = time.time()
-    eliminar = [tid for tid, data in tracks.items() if ahora - data["last_seen"] > 2]
-    for tid in eliminar:
-        del tracks[tid]
+        # DEBUG consola
+        with lock:
+            activos = len(tracks)
+            print(f"[DEBUG] Persona ID={tid}, cx={cx}, cy={cy}, lado={side}, conf={conf:.2f}")
+            print(f"👥 Activos={activos} | Entradas={total_in} | Salidas={total_out}")
 
+# ==========================
+# Servidor web
+# ==========================
+app = Flask(__name__)
+
+# Template HTML para la página principal
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Contador de Personas</title>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .stats { display: flex; justify-content: space-around; margin: 30px 0; }
+        .stat-box { text-align: center; padding: 20px; border-radius: 8px; }
+        .activos { background: #e3f2fd; color: #1976d2; }
+        .entradas { background: #e8f5e8; color: #388e3c; }
+        .salidas { background: #fff3e0; color: #f57c00; }
+        .number { font-size: 2.5em; font-weight: bold; display: block; }
+        .label { font-size: 1.2em; margin-top: 5px; }
+        .last-update { text-align: center; color: #666; margin-top: 20px; }
+        .auto-refresh { text-align: center; margin-top: 20px; }
+        button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
+        .refresh-btn { background: #2196f3; color: white; }
+        .auto-btn { background: #4caf50; color: white; }
+        .stop-btn { background: #f44336; color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Contador de Personas en Tiempo Real</h1>
+        
+        <div class="stats">
+            <div class="stat-box activos">
+                <span class="number" id="activos">0</span>
+                <span class="label">Personas Activas</span>
+            </div>
+            <div class="stat-box entradas">
+                <span class="number" id="entradas">0</span>
+                <span class="label">Entradas</span>
+            </div>
+            <div class="stat-box salidas">
+                <span class="number" id="salidas">0</span>
+                <span class="label">Salidas</span>
+            </div>
+        </div>
+        
+        <div class="last-update">
+            <p>Última actualización: <span id="last-update">-</span></p>
+        </div>
+        
+        <div class="auto-refresh">
+            <button class="refresh-btn" onclick="refreshData()">🔄 Actualizar Manual</button>
+            <button class="auto-btn" onclick="startAutoRefresh()">▶️ Auto-refresh ON</button>
+            <button class="stop-btn" onclick="stopAutoRefresh()">⏹️ Auto-refresh OFF</button>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshInterval;
+        
+        function updateData() {
+            fetch('/counts')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('activos').textContent = data.activos;
+                    document.getElementById('entradas').textContent = data.entradas;
+                    document.getElementById('salidas').textContent = data.salidas;
+                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                })
+                .catch(error => console.error('Error:', error));
+        }
+        
+        function refreshData() {
+            updateData();
+        }
+        
+        function startAutoRefresh() {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            autoRefreshInterval = setInterval(updateData, 1000);
+            console.log('Auto-refresh iniciado');
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+                console.log('Auto-refresh detenido');
+            }
+        }
+        
+        // Cargar datos iniciales y iniciar auto-refresh
+        updateData();
+        startAutoRefresh();
+    </script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route("/counts")
+def counts():
+    with lock:
+        return jsonify({
+            "activos": len(tracks),
+            "entradas": total_in,
+            "salidas": total_out,
+            "timestamp": last_update
+        })
+
+@app.route("/status")
+def status():
+    with lock:
+        return jsonify({
+            "activos": len(tracks),
+            "entradas": total_in,
+            "salidas": total_out,
+            "tracks_activos": list(tracks.keys()),
+            "ultima_actualizacion": datetime.fromtimestamp(last_update).strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+def start_web():
+    print("🌐 Iniciando servidor web en http://0.0.0.0:5000", file=sys.stderr)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
+# ==========================
+# Main
+# ==========================
 def main():
-    global total_entradas, total_salidas
-    proc = launch()
-    print("⏳ Esperando detecciones del IMX500 (MobileNet-SSD)...", file=sys.stderr)
-    print("🔄 Cargando firmware de red en el IMX500 (puede tomar varios minutos)...", file=sys.stderr)
+    print("🚀 Iniciando sistema de detección de personas...", file=sys.stderr)
+    
+    # Hilo del rpicam-hello
+    t_rpi = threading.Thread(target=rpicam_hello_reader, daemon=True)
+    t_rpi.start()
+    print("📹 Hilo de detección iniciado", file=sys.stderr)
 
+    # Hilo servidor web
+    t_web = threading.Thread(target=start_web, daemon=True)
+    t_web.start()
+    print("🌐 Hilo del servidor web iniciado", file=sys.stderr)
+
+    # Mantener script principal vivo
     try:
         while True:
-            line = proc.stderr.readline()
-            if not line:
-                line = proc.stdout.readline()
-                if not line:
-                    continue
-
-            line = line.strip()
-            m = LINE_RE.search(line)
-            if not m:
-                continue
-
-            label = m.group(2).lower()
-            conf = float(m.group(3))
-            x = int(m.group(4))
-            y = int(m.group(5))
-            w = int(m.group(6))
-            h = int(m.group(7))
-            cx, cy = x + w // 2, y + h // 2
-
-            if label == "person" and conf >= 0.5:
-                tid = asignar_id(cx, cy)
-
-                # Determinar de qué lado de la línea está
-                side = "L" if cx < LINE_X else "R"
-                last_side = tracks[tid].get("last_side", "?")
-
-                if last_side != "?" and last_side != side:
-                    if last_side == "L" and side == "R":
-                        total_entradas += 1
-                        print(f"➡️ ENTRADA detectada (ID={tid}) Total entradas={total_entradas}")
-                    elif last_side == "R" and side == "L":
-                        total_salidas += 1
-                        print(f"⬅️ SALIDA detectada (ID={tid}) Total salidas={total_salidas}")
-
-                tracks[tid]["last_side"] = side
-
-                ts = time.strftime("%H:%M:%S")
-                print(f"[{ts}] ID={tid} PERSONA conf={conf:.2f} cx={cx} side={side}")
-
-            limpiar_tracks()
-
-            # Mostrar resumen cada frame
-            activos = len(tracks)
-            print(f"👥 Activos={activos} | Entradas={total_entradas} | Salidas={total_salidas}")
-
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\n🛑 Interrumpido por el usuario.", file=sys.stderr)
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
 
 if __name__ == "__main__":
     main()
