@@ -12,6 +12,8 @@ import sys
 import re
 from flask import Flask, jsonify, Response, render_template_string
 from datetime import datetime
+import psutil
+import os
 
 # ==========================
 # Configuración
@@ -41,6 +43,10 @@ total_out = 0
 last_update = time.time()
 lock = threading.Lock()
 latest_frame = None  # Para video feed
+
+cpu_usage = 0.0
+ram_usage = 0.0
+cpu_temp = 0.0
 
 
 # ==========================
@@ -409,6 +415,9 @@ def status():
                 "entradas": total_in,
                 "salidas": total_out,
                 "tracks_activos": tracks_pos,
+                "cpu_usage": cpu_usage,
+                "ram_usage": ram_usage,
+                "cpu_temp": cpu_temp,
                 "ultima_actualizacion": datetime.fromtimestamp(last_update).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
@@ -461,6 +470,22 @@ def start_web():
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 
 
+def actualizar_metricas():
+    global cpu_usage, ram_usage, cpu_temp
+    while True:
+        try:
+            cpu_usage = psutil.cpu_percent(interval=None)
+            ram_usage = psutil.virtual_memory().percent
+            # Lectura de temperatura en Raspberry Pi
+            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                    cpu_temp = float(f.read().strip()) / 1000.0
+            time.sleep(1)
+        except Exception as e:
+            print(f"⚠️ Error actualizando métricas: {e}", file=sys.stderr)
+            time.sleep(1)
+
+
 # ==========================
 # Main
 # ==========================
@@ -474,6 +499,10 @@ def main():
     t_web = threading.Thread(target=start_web, daemon=True)
     t_web.start()
     print("🌐 Hilo del servidor web iniciado", file=sys.stderr)
+
+    t_metrics = threading.Thread(target=actualizar_metricas, daemon=True)
+    t_metrics.start()
+    print("📊 Hilo de métricas iniciado", file=sys.stderr)
 
     try:
         while True:
