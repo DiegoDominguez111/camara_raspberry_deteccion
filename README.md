@@ -1,411 +1,108 @@
-# 🚀 Sistema de Conteo de Personas AI - Raspberry Pi 5 + IMX500
+# Detección de Personas con Raspberry Pi AI Camera
 
-## 📋 **DESCRIPCIÓN DEL SISTEMA**
+Este proyecto contiene scripts para detectar personas en tiempo real usando la Raspberry Pi AI Camera con el modelo MobileNet-SSD en el chip IMX500.
 
-Sistema de conteo de personas en tiempo real optimizado para Raspberry Pi 5 con cámara AI Sony IMX500. El sistema captura video, detecta personas usando YOLO, realiza tracking y cuenta entradas/salidas a través de una línea virtual configurable.
+## Requisitos
 
-## 🎯 **CARACTERÍSTICAS PRINCIPALES**
+- Raspberry Pi 5 con AI Camera (IMX500)
+- Sistema operativo con soporte para `rpicam-hello`
+- Python 3.6+
 
-- **🎥 Captura en tiempo real** desde cámara IMX500
-- **🤖 Detección AI** usando YOLOv8 optimizado
-- **📊 Tracking robusto** con IDs persistentes
-- **🔢 Conteo automático** de entradas y salidas
-- **🌐 Servidor web** con streaming MJPEG y API REST
-- **⚙️ Servicios systemd** para operación automática
-- **📈 Métricas en tiempo real** (FPS, CPU, memoria, temperatura)
+## Scripts Disponibles
 
-## 🏗️ **ARQUITECTURA DEL SISTEMA**
+### 1. `lectura_mobilessd.py` - Detección Básica
+Script principal que detecta personas y muestra sus coordenadas en tiempo real.
 
-```
-IMX500 Camera → Python Detector → Node.js API → Web Interface
-     ↓              ↓              ↓            ↓
-  Video Stream → Person Detection → REST API → Browser
-     ↓              ↓              ↓            ↓
-  MJPEG Feed → Tracking & Count → WebSocket → Real-time Updates
-```
-
-## 📁 **ESTRUCTURA DEL PROYECTO**
-
-```
-camara_1/
-├── detector_entrada_salida_v2.py    # 🎯 Detector principal Python
-├── cam_server.py                     # 🌐 Servidor web Flask
-├── servicio_camara_node.js           # 🔌 API Node.js
-├── config_detector.json              # ⚙️ Configuración del detector
-├── camara-ai-detector.service        # 🔧 Servicio systemd detector
-├── camara-ai-node.service            # 🔧 Servicio systemd Node.js
-├── instalar_sistema.sh               # 🚀 Script de instalación
-├── requirements.txt                  # 📦 Dependencias Python
-├── package.json                      # 📦 Dependencias Node.js
-├── yolov8n.pt                        # 🤖 Modelo YOLO
-├── venv_camara_ai/                   # 🐍 Entorno virtual Python
-├── node_modules/                     # 📦 Módulos Node.js
-├── api/                              # 🔌 API del sistema
-└── templates/                        # 🎨 Templates HTML
-```
-
-## 🚀 **INSTALACIÓN Y CONFIGURACIÓN**
-
-### 📋 **Requisitos Previos**
-
-- Raspberry Pi 5 con Raspberry Pi OS
-- Cámara AI Sony IMX500 conectada
-- Python 3.8+
-- Node.js 16+
-- Acceso root para servicios systemd
-
-### 🔧 **Instalación Automática**
-
+**Uso:**
 ```bash
-# Clonar o descargar el proyecto
-cd camara_1
-
-# Dar permisos de ejecución
-chmod +x instalar_sistema.sh
-
-# Ejecutar instalador automático
-sudo ./instalar_sistema.sh
+python3 lectura_mobilessd.py
 ```
 
-### 🔧 **Instalación Manual**
+**Salida:**
+```
+⏳ Esperando detecciones del IMX500 (MobileNet-SSD)...
+🔄 Cargando firmware de red en el IMX500 (puede tomar varios minutos)...
+[10:40:16] PERSONA conf=0.73 bbox=563,436-2027,1506
+[10:40:16] PERSONA conf=0.78 bbox=602,436-2027,1506
+```
 
-#### 1. **Dependencias Python**
+### 2. `lectura_mobilessd_stats.py` - Detección con Estadísticas
+Versión avanzada que incluye estadísticas en tiempo real de las detecciones.
+
+**Uso:**
 ```bash
-# Crear entorno virtual
-python3 -m venv venv_camara_ai
-source venv_camara_ai/bin/activate
-
-# Instalar dependencias
-pip install -r requirements.txt
+python3 lectura_mobilessd_stats.py
 ```
 
-#### 2. **Dependencias Node.js**
+**Salida:**
+```
+⏳ Esperando detecciones del IMX500 (MobileNet-SSD)...
+🔄 Cargando firmware de red en el IMX500 (puede tomar varios minutos)...
+📊 Las estadísticas se mostrarán cada 10 segundos
+[10:40:16] PERSONA conf=0.73 bbox=563,436-2027,1506
+
+📊 ESTADÍSTICAS DE DETECCIÓN:
+   ⏱️  Tiempo activo: 15.2s
+   🎯 Detecciones/min: 45
+   📈 Total detecciones: 67
+   🔝 Confianza máxima: 0.88
+   🔻 Confianza mínima: 0.62
+--------------------------------------------------
+```
+
+## Parámetros de Configuración
+
+Los scripts utilizan los siguientes parámetros para `rpicam-hello`:
+
+- `-n`: Sin ventana de preview
+- `-t 0`: Sin límite de tiempo
+- `-v 2`: Verbosidad nivel 2
+- `--post-process-file`: Archivo de configuración del modelo MobileNet-SSD
+- `--lores-width 640 --lores-height 480`: Resolución de procesamiento
+
+## Formato de Salida
+
+Cada detección incluye:
+- **Timestamp**: Hora de la detección
+- **Confianza**: Valor entre 0.0 y 1.0 (solo se muestran detecciones ≥ 0.5)
+- **Bounding Box**: Coordenadas (x1,y1)-(x2,y2) de la caja delimitadora
+
+## Interpretación de Coordenadas
+
+Las coordenadas están en el espacio de la imagen:
+- **x, y**: Esquina superior izquierda de la caja delimitadora
+- **x1, y1**: Esquina inferior derecha de la caja delimitadora
+- **Resolución**: Las coordenadas están normalizadas para la resolución de procesamiento
+
+## Solución de Problemas
+
+### El script no detecta nada
+1. Verifica que la cámara esté conectada correctamente
+2. Asegúrate de que haya personas en el campo de visión
+3. El firmware puede tardar varios minutos en cargarse la primera vez
+
+### Error de permisos
 ```bash
-# Instalar módulos
-npm install
+sudo chmod +x lectura_mobilessd.py
 ```
 
-#### 3. **Configurar Servicios Systemd**
-```bash
-# Copiar archivos de servicio
-sudo cp camara-ai-*.service /etc/systemd/system/
+### El proceso no termina correctamente
+Usa Ctrl+C para interrumpir el script. El proceso se cerrará automáticamente.
 
-# Recargar systemd
-sudo systemctl daemon-reload
+## Rendimiento
 
-# Habilitar servicios
-sudo systemctl enable camara-ai-detector
-sudo systemctl enable camara-ai-node
-```
+- **Latencia**: ~30ms por detección
+- **FPS**: ~30 FPS de detección
+- **Precisión**: Confianza típica entre 0.6-0.9 para personas claramente visibles
+- **Uso de CPU**: Mínimo (procesamiento en el chip IMX500)
 
-## 🎮 **USO DEL SISTEMA**
+## Personalización
 
-### 🚀 **Inicio Automático (Recomendado)**
+Puedes modificar los parámetros en la función `launch()`:
+- Cambiar la resolución de procesamiento
+- Ajustar el umbral de confianza (actualmente 0.5)
+- Modificar el nivel de verbosidad
 
-```bash
-# Iniciar todos los servicios
-sudo systemctl start camara-ai-detector
-sudo systemctl start camara-ai-node
+## Licencia
 
-# Verificar estado
-sudo systemctl status camara-ai-*
-```
-
-### 🚀 **Inicio Manual (Para desarrollo/pruebas)**
-
-#### **Opción 1: Servidor Web Flask (Streaming + API)**
-```bash
-# Activar entorno virtual
-source venv_camara_ai/bin/activate
-
-# Iniciar servidor web
-python3 cam_server.py
-```
-
-**Acceso:**
-- 🌐 **Interfaz web**: http://localhost:5000
-- 📹 **Streaming**: http://localhost:5000/stream
-- 📊 **Métricas**: http://localhost:5000/metrics
-- 🔢 **Contadores**: http://localhost:5000/counts
-- 🏥 **Health**: http://localhost:5000/health
-
-#### **Opción 2: Detector Python Standalone**
-```bash
-# Activar entorno virtual
-source venv_camara_ai/bin/activate
-
-# Ejecutar detector
-python3 detector_entrada_salida_v2.py --config config_detector.json
-```
-
-#### **Opción 3: API Node.js**
-```bash
-# Iniciar servidor Node.js
-node servicio_camara_node.js
-```
-
-## ⚙️ **CONFIGURACIÓN**
-
-### 📝 **Archivo de Configuración Principal**
-
-`config_detector.json` - Configuración del detector Python:
-
-```json
-{
-  "resolucion": [640, 480],
-  "fps_objetivo": 25,
-  "confianza_minima": 0.4,
-  "area_minima": 2000,
-  "roi_puerta": [80, 80, 560, 400],
-  "linea_cruce": 240,
-  "ancho_banda_cruce": 3,
-  "debounce_ms": 300,
-  "track_lost_ms": 700,
-  "exposure_us": 4000,
-  "gain": 1.0
-}
-```
-
-### 🔧 **Parámetros Importantes**
-
-- **`resolucion`**: Resolución de captura [ancho, alto]
-- **`fps_objetivo`**: FPS objetivo de captura
-- **`confianza_minima`**: Umbral de confianza para detecciones
-- **`roi_puerta`**: Región de interés [x1, y1, x2, y2]
-- **`linea_cruce`**: Posición Y de la línea de conteo
-- **`debounce_ms`**: Tiempo de anti-rebote en milisegundos
-
-## 🧪 **PRUEBAS Y VALIDACIÓN**
-
-### 🔍 **Pruebas Básicas del Sistema**
-
-#### 1. **Verificar Servicios**
-```bash
-# Estado de servicios
-sudo systemctl status camara-ai-detector
-sudo systemctl status camara-ai-node
-
-# Logs de servicios
-sudo journalctl -u camara-ai-detector -f
-sudo journalctl -u camara-ai-node -f
-```
-
-#### 2. **Prueba del Servidor Web**
-```bash
-# Iniciar servidor
-source venv_camara_ai/bin/activate
-python3 cam_server.py
-
-# En otra terminal, verificar endpoints
-curl http://localhost:5000/health
-curl http://localhost:5000/metrics
-```
-
-#### 3. **Prueba del Detector**
-```bash
-# Activar entorno virtual
-source venv_camara_ai/bin/activate
-
-# Ejecutar detector
-python3 detector_entrada_salida_v2.py --config config_detector.json
-```
-
-### 📊 **Métricas de Rendimiento**
-
-#### **Objetivos de Rendimiento**
-- **FPS efectivo**: ≥ 20 FPS sostenido
-- **Latencia**: < 200ms exposición→evento
-- **CPU**: ≤ 35% promedio en 1 núcleo
-- **Memoria**: ≤ 300 MB para el proceso de conteo
-- **Precisión**: ≥ 95% en conteo a velocidad normal
-
-#### **Monitoreo en Tiempo Real**
-```bash
-# Métricas del sistema
-curl http://localhost:5000/metrics | python3 -m json.tool
-
-# Estado de salud
-curl http://localhost:5000/health | python3 -m json.tool
-
-# Contadores
-curl http://localhost:5000/counts | python3 -m json.tool
-```
-
-### 🎯 **Pruebas de Funcionalidad**
-
-#### **Prueba de Conteo**
-1. **Configurar línea de cruce** en `config_detector.json`
-2. **Ejecutar sistema** en modo manual
-3. **Pasar personas** por la línea de cruce
-4. **Verificar contadores** en tiempo real
-5. **Validar precisión** del conteo
-
-#### **Prueba de Streaming**
-1. **Iniciar servidor web** (`python3 cam_server.py`)
-2. **Abrir navegador** en http://localhost:5000
-3. **Verificar video** en tiempo real
-4. **Comprobar anotaciones** (bounding boxes, línea de cruce)
-5. **Validar métricas** en pantalla
-
-## 🚨 **SOLUCIÓN DE PROBLEMAS**
-
-### ❌ **Problemas Comunes**
-
-#### **Cámara no detectada**
-```bash
-# Verificar conexión física
-lsusb | grep -i camera
-
-# Verificar drivers
-ls /dev/video*
-
-# Probar comando rpicam
-rpicam-hello
-```
-
-#### **Servicios no inician**
-```bash
-# Verificar logs
-sudo journalctl -u camara-ai-detector -n 50
-sudo journalctl -u camara-ai-node -n 50
-
-# Verificar permisos
-ls -la /etc/systemd/system/camara-ai-*.service
-
-# Recargar systemd
-sudo systemctl daemon-reload
-```
-
-#### **Bajo rendimiento**
-```bash
-# Verificar temperatura
-cat /sys/class/thermal/thermal_zone0/temp
-
-# Verificar uso de CPU
-htop
-
-# Verificar uso de memoria
-free -h
-```
-
-### 🔧 **Comandos de Diagnóstico**
-
-```bash
-# Estado del sistema
-sudo systemctl status camara-ai-*
-
-# Logs en tiempo real
-sudo journalctl -u camara-ai-detector -f
-sudo journalctl -u camara-ai-node -f
-
-# Verificar puertos
-sudo netstat -tlnp | grep :5000
-sudo netstat -tlnp | grep :3000
-
-# Verificar procesos
-ps aux | grep python
-ps aux | grep node
-```
-
-## 📈 **MONITOREO Y MANTENIMIENTO**
-
-### 📊 **Métricas a Monitorear**
-
-- **FPS de captura e inferencia**
-- **Uso de CPU y memoria**
-- **Temperatura de la Raspberry Pi**
-- **Precisión del conteo**
-- **Latencia del sistema**
-
-### 🔄 **Mantenimiento Rutinario**
-
-#### **Diario**
-- Verificar estado de servicios
-- Revisar logs de errores
-- Comprobar métricas de rendimiento
-
-#### **Semanal**
-- Reiniciar servicios si es necesario
-- Verificar espacio en disco
-- Actualizar logs del sistema
-
-#### **Mensual**
-- Verificar actualizaciones del sistema
-- Limpiar logs antiguos
-- Validar precisión del conteo
-
-## 🚀 **DESPLIEGUE EN PRODUCCIÓN**
-
-### 📋 **Checklist de Producción**
-
-- [ ] **Hardware verificado** (Raspberry Pi 5 + IMX500)
-- [ ] **Sistema operativo actualizado** (Raspberry Pi OS)
-- [ ] **Dependencias instaladas** (Python, Node.js)
-- [ ] **Servicios systemd configurados** y habilitados
-- [ ] **Configuración optimizada** para el entorno
-- [ ] **Monitoreo configurado** (logs, métricas)
-- [ ] **Backup configurado** del sistema
-- [ ] **Documentación actualizada** para el equipo
-
-### 🔒 **Consideraciones de Seguridad**
-
-- **Servicios ejecutándose como usuario no-root** (configurado como root111)
-- **Puertos expuestos solo en red local**
-- **Logs de acceso y errores habilitados**
-- **Monitoreo de recursos del sistema**
-
-### 📦 **Backup y Recuperación**
-
-```bash
-# Backup de configuración
-sudo cp -r /home/root111/camara_1 /backup/camara_1_$(date +%Y%m%d)
-
-# Backup de servicios systemd
-sudo cp /etc/systemd/system/camara-ai-*.service /backup/
-
-# Restaurar desde backup
-sudo cp -r /backup/camara_1_YYYYMMDD /home/root111/camara_1
-sudo cp /backup/camara-ai-*.service /etc/systemd/system/
-sudo systemctl daemon-reload
-```
-
-## 📚 **RECURSOS ADICIONALES**
-
-### 🔗 **Enlaces Útiles**
-
-- **Documentación del sistema**: `SISTEMA_FINAL.md`
-- **Configuración del detector**: `config_detector.json`
-- **Script de instalación**: `instalar_sistema.sh`
-- **Servicios systemd**: `camara-ai-*.service`
-
-### 📖 **Referencias Técnicas**
-
-- **YOLOv8**: https://github.com/ultralytics/ultralytics
-- **OpenCV**: https://opencv.org/
-- **Flask**: https://flask.palletsprojects.com/
-- **Node.js**: https://nodejs.org/
-- **Systemd**: https://systemd.io/
-
-## 🆘 **SOPORTE Y CONTACTO**
-
-### 📧 **Reportar Problemas**
-
-1. **Verificar logs** del servicio correspondiente
-2. **Documentar síntomas** y pasos para reproducir
-3. **Incluir métricas** del sistema (CPU, memoria, temperatura)
-4. **Adjuntar configuración** actual (`config_detector.json`)
-
-### 🔧 **Escalación de Problemas**
-
-1. **Reiniciar servicios** afectados
-2. **Verificar recursos** del sistema
-3. **Revisar conectividad** de la cámara
-4. **Contactar equipo** de desarrollo si persiste
-
----
-
-## 🎉 **¡SISTEMA LISTO PARA PRODUCCIÓN!**
-
-El sistema de conteo de personas está optimizado, probado y listo para operar en entornos de producción. Sigue las instrucciones de instalación y configuración para un despliegue exitoso.
-
-**🚀 ¡Que tengas éxito con tu implementación!** 
+Este proyecto es de código abierto y está disponible bajo la licencia MIT. 
