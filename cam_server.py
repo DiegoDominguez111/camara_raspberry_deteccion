@@ -104,8 +104,7 @@ class ProcesadorSegundoPlano:
                 '--exposure', 'normal',  # Exposición normal
                 '--gain', '1.0',  # Ganancia mínima
                 '--denoise', 'cdn_off',  # Desactivar denoise
-                '--inline',  # Sin buffering
-                '--flush'  # Flush inmediato
+                # Opciones removidas por compatibilidad
             ]
             
             print(f"🔧 Comando cámara: {' '.join(comando_config)}")
@@ -241,7 +240,7 @@ class ProcesadorSegundoPlano:
                 print(f"❌ Modelo AI no encontrado: {modelo_ai}")
                 return []
             
-            # Comando optimizado para inferencia AI rápida
+            # Comando optimizado para inferencia AI rápida (sin opciones no válidas)
             comando_inferencia = [
                 '/usr/bin/rpicam-still',
                 '--width', '320',  # Resolución reducida para mayor velocidad
@@ -255,9 +254,7 @@ class ProcesadorSegundoPlano:
                 '--timeout', '300',  # Timeout mínimo para máxima velocidad
                 '--awb', 'auto',
                 '--metering', 'centre',
-                '--denoise', 'cdn_off',
-                '--inline',  # Sin buffering
-                '--flush'  # Flush inmediato
+                '--denoise', 'cdn_off'
             ]
             
             # Ejecutar inferencia AI
@@ -368,24 +365,34 @@ class ProcesadorSegundoPlano:
                 # Calcular diferencia entre frames
                 diff = cv2.absdiff(frame_anterior_small, gray_small)
                 
-                # Aplicar umbral para detectar movimiento
-                _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
+                # Aplicar umbral más sensible para detectar movimiento
+                _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+                
+                # Aplicar operaciones morfológicas para mejorar la detección
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
                 
                 # Encontrar contornos con aproximación simplificada
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
                 detecciones = []
                 
-                # Procesar solo los contornos más grandes para mayor velocidad
+                # Procesar contornos con filtros mejorados para personas
                 contours_filtered = []
                 for contour in contours:
                     area = cv2.contourArea(contour)
-                    if area > 500:  # Área mínima reducida
-                        contours_filtered.append(contour)
+                    if area > 400:  # Área mínima reducida para detectar más objetos
+                        # Verificar proporción (personas suelen ser más altas que anchas)
+                        x, y, w, h = cv2.boundingRect(contour)
+                        if w > 0 and h > 0:
+                            ratio = h / w
+                            if 1.2 <= ratio <= 3.0:  # Proporción típica de personas
+                                contours_filtered.append(contour)
                 
-                # Ordenar por área y tomar solo los 3 más grandes
+                # Ordenar por área y tomar solo los 2 más grandes (evitar duplicados)
                 contours_filtered.sort(key=cv2.contourArea, reverse=True)
-                contours_filtered = contours_filtered[:3]
+                contours_filtered = contours_filtered[:2]
                 
                 for contour in contours_filtered:
                     x, y, w, h = cv2.boundingRect(contour)
@@ -404,10 +411,19 @@ class ProcesadorSegundoPlano:
                     centro_y = y_orig + h_orig // 2
                     
                     if self.esta_en_roi_puerta([centro_x, centro_y]):
+                        # Calcular confianza basada en el área y proporción
+                        confianza_base = 0.5
+                        if area > 1000:  # Área grande = mayor confianza
+                            confianza_base += 0.1
+                        if 1.2 <= ratio <= 3.0:  # Proporción típica de personas
+                            confianza_base += 0.1
+                        if area > 2000:  # Área muy grande = mayor confianza
+                            confianza_base += 0.1
+                        
                         deteccion = Deteccion(
                             timestamp=time.time(),
                             bbox=[x_orig, y_orig, x_orig + w_orig, y_orig + h_orig],
-                            confianza=0.6,  # Confianza aumentada
+                            confianza=min(confianza_base, 0.7),  # Confianza ajustada
                             centro=[centro_x, centro_y],
                             area=w_orig * h_orig
                         )
@@ -763,9 +779,13 @@ class TrackerPersonas:
                     distancia_minima = distancia
                     persona_id = pid
             
-            # Si no se encontró, crear nueva persona
+            # Si no se encontró, crear nueva persona con ID único
             if persona_id is None:
-                persona_id = len(self.personas_detectadas) + 1
+                # Buscar el siguiente ID disponible
+                next_id = 1
+                while next_id in self.personas_detectadas:
+                    next_id += 1
+                persona_id = next_id
                 print(f"🆔 Nueva persona detectada: ID={persona_id}, centro=({centro[0]},{centro[1]})")
             
             personas_actuales[persona_id] = centro
@@ -787,9 +807,13 @@ class TrackerPersonas:
             if self.personas_estado[persona_id]['cooldown'] > 0:
                 self.personas_estado[persona_id]['cooldown'] -= 1
             
-            # Determinar de qué lado de la línea está el centro
+            # Determinar de qué lado de la línea está el centro con banda de cruce
             x_centro = centro[0]
-            if x_centro < self.linea_virtual:
+            banda_cruce = self.config.get('ancho_banda_cruce', 15)
+            
+            if abs(x_centro - self.linea_virtual) <= banda_cruce:
+                lado_actual = 'en_linea'
+            elif x_centro < self.linea_virtual:
                 lado_actual = 'izquierda'
             else:
                 lado_actual = 'derecha'
@@ -798,29 +822,37 @@ class TrackerPersonas:
             estado = self.personas_estado[persona_id]['estado']
             lado_anterior = self.personas_estado[persona_id]['lado_anterior']
             
-            # Lógica de cruce (como en servidor_web_deteccion.py)
+            # Lógica de cruce mejorada para evitar falsos positivos
             if estado == 'esperando':
-                if lado_anterior is not None and lado_anterior != lado_actual:
-                    # Cruzó la línea
-                    if lado_anterior == 'izquierda' and lado_actual == 'derecha' and self.personas_estado[persona_id]['cooldown'] == 0:
+                if (lado_anterior is not None and 
+                    lado_anterior != lado_actual and 
+                    lado_anterior != 'en_linea' and 
+                    lado_actual != 'en_linea' and
+                    self.personas_estado[persona_id]['cooldown'] == 0):
+                    
+                    # Verificar que realmente cruzó la línea (no solo rebotó)
+                    if (lado_anterior == 'izquierda' and lado_actual == 'derecha'):
+                        # ENTRADA: izquierda -> derecha
                         self.contador_entradas += 1
                         self.personas_en_habitacion += 1
                         self.personas_estado[persona_id]['estado'] = 'contado'
-                        self.personas_estado[persona_id]['cooldown'] = 15
-                        print(f"[CRUCE] ID {persona_id} ENTRADA (izq->der) - Total entradas: {self.contador_entradas}")
-                    elif lado_anterior == 'derecha' and lado_actual == 'izquierda' and self.personas_estado[persona_id]['cooldown'] == 0:
+                        self.personas_estado[persona_id]['cooldown'] = 20  # Cooldown aumentado
+                        print(f"🚪 [ENTRADA] ID {persona_id} (izq->der) - Total: {self.contador_entradas}, En habitación: {self.personas_en_habitacion}")
+                        
+                    elif (lado_anterior == 'derecha' and lado_actual == 'izquierda'):
+                        # SALIDA: derecha -> izquierda
                         self.contador_salidas += 1
                         self.personas_en_habitacion = max(0, self.personas_en_habitacion - 1)
                         self.personas_estado[persona_id]['estado'] = 'contado'
-                        self.personas_estado[persona_id]['cooldown'] = 15
-                        print(f"[CRUCE] ID {persona_id} SALIDA (der->izq) - Total salidas: {self.contador_salidas}")
-                else:
-                    # No ha cruzado, sigue esperando
-                    self.personas_estado[persona_id]['estado'] = 'esperando'
+                        self.personas_estado[persona_id]['cooldown'] = 20  # Cooldown aumentado
+                        print(f"🚪 [SALIDA] ID {persona_id} (der->izq) - Total: {self.contador_salidas}, En habitación: {self.personas_en_habitacion}")
+                        
             elif estado == 'contado':
-                # Esperar a que la persona se aleje de la línea para resetear
-                if lado_actual == lado_anterior:
+                # Esperar a que la persona se aleje completamente de la línea para resetear
+                if (lado_actual != 'en_linea' and 
+                    abs(centro[0] - self.linea_virtual) > banda_cruce * 2):
                     self.personas_estado[persona_id]['estado'] = 'esperando'
+                    print(f"🔄 ID {persona_id} reseteado para nuevo cruce")
             
             # Actualizar lado anterior
             self.personas_estado[persona_id]['lado_anterior'] = lado_actual
@@ -836,7 +868,11 @@ class TrackerPersonas:
             if pid in self.personas_estado:
                 del self.personas_estado[pid]
         
-        print(f"📊 Estado actual: {len(personas_actuales)} personas activas, {len(self.historial_personas)} historiales")
+        # Log detallado para debug del tracking
+        if personas_actuales:
+            print(f"📊 Tracking: {len(personas_actuales)} personas activas, IDs: {list(personas_actuales.keys())}")
+            print(f"📊 Contadores: Entradas={self.contador_entradas}, Salidas={self.contador_salidas}, En habitación={self.personas_en_habitacion}")
+        
         return personas_actuales
     
     def obtener_contadores(self):
