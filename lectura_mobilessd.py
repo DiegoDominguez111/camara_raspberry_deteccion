@@ -283,22 +283,36 @@ HTML_TEMPLATE = f"""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Contador de Personas</title>
+    <title>Contador de Personas y Estado del Sistema</title>
     <meta charset="utf-8">
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }}
-        .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        .stats {{ display: flex; justify-content: space-around; margin: 30px 0; }}
-        .stat-box {{ text-align: center; padding: 20px; border-radius: 8px; }}
-        .activos {{ background: #e3f2fd; color: #1976d2; }}
-        .entradas {{ background: #e8f5e8; color: #388e3c; }}
-        .salidas {{ background: #fff3e0; color: #f57c00; }}
-        .number {{ font-size: 2.5em; font-weight: bold; display: block; }}
-        .label {{ font-size: 1.2em; margin-top: 5px; }}
-        .last-update {{ text-align: center; color: #666; margin-top: 20px; }}
-        canvas {{ border: 2px solid #333; background: #000; display: block; margin: 20px auto; }}
-        .video-feed {{ border: 2px solid #333; display: block; margin: 20px auto; }}
-        .auto-refresh {{ text-align: center; margin-top: 20px; }}
+        body {{ font-family: Arial, sans-serif; margin: 0; background: #f0f0f0; }}
+        .container {{ display: flex; height: 100vh; }}
+        .sidebar {{
+            width: 250px;
+            background: #333;
+            color: white;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+        }}
+        .sidebar h2 {{ margin-top: 0; color: #ffcc00; }}
+        .stat-box {{ background: #444; padding: 15px; margin-bottom: 15px; border-radius: 8px; text-align: center; }}
+        .stat-box .number {{ font-size: 2em; font-weight: bold; display: block; }}
+        .stat-box .label {{ font-size: 1em; margin-top: 5px; }}
+        .content {{
+            flex-grow: 1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-y: auto;
+        }}
+        canvas {{ border: 2px solid #333; background: #000; margin-bottom: 20px; }}
+        .video-feed {{ border: 2px solid #333; }}
+        .refresh-buttons {{ margin-top: 20px; text-align: center; }}
         button {{ padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }}
         .refresh-btn {{ background: #2196f3; color: white; }}
         .auto-btn {{ background: #4caf50; color: white; }}
@@ -307,37 +321,42 @@ HTML_TEMPLATE = f"""
 </head>
 <body>
 <div class="container">
-<h1>📊 Contador de Personas en Tiempo Real</h1>
-
-<div class="stats">
-    <div class="stat-box activos">
-        <span class="number" id="activos">0</span>
-        <span class="label">Personas Activas</span>
+    <div class="sidebar">
+        <h2>📊 Estadísticas</h2>
+        <div class="stat-box activos">
+            <span class="number" id="activos">0</span>
+            <span class="label">Personas Activas</span>
+        </div>
+        <div class="stat-box entradas">
+            <span class="number" id="entradas">0</span>
+            <span class="label">Entradas</span>
+        </div>
+        <div class="stat-box salidas">
+            <span class="number" id="salidas">0</span>
+            <span class="label">Salidas</span>
+        </div>
+        <div class="stat-box cpu">
+            <span class="number" id="cpu_usage">0%</span>
+            <span class="label">CPU Usage</span>
+        </div>
+        <div class="stat-box ram">
+            <span class="number" id="ram_usage">0%</span>
+            <span class="label">RAM Usage</span>
+        </div>
+        <div class="stat-box temp">
+            <span class="number" id="cpu_temp">0°C</span>
+            <span class="label">CPU Temp</span>
+        </div>
+        <div class="refresh-buttons">
+            <button class="refresh-btn" onclick="refreshData()">🔄 Actualizar</button>
+            <button class="auto-btn" onclick="startAutoRefresh()">▶️ Auto ON</button>
+            <button class="stop-btn" onclick="stopAutoRefresh()">⏹️ Auto OFF</button>
+        </div>
     </div>
-    <div class="stat-box entradas">
-        <span class="number" id="entradas">0</span>
-        <span class="label">Entradas</span>
+    <div class="content">
+        <canvas id="camCanvas" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}"></canvas>
+        <img id="videoFeed" class="video-feed" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}" src="/video_feed" />
     </div>
-    <div class="stat-box salidas">
-        <span class="number" id="salidas">0</span>
-        <span class="label">Salidas</span>
-    </div>
-</div>
-
-<canvas id="camCanvas" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}"></canvas>
-
-<h2>🎥 Video en tiempo real</h2>
-<img id="videoFeed" class="video-feed" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}" src="/video_feed" />
-
-<div class="last-update">
-    <p>Última actualización: <span id="last-update">-</span></p>
-</div>
-
-<div class="auto-refresh">
-    <button class="refresh-btn" onclick="refreshData()">🔄 Actualizar Manual</button>
-    <button class="auto-btn" onclick="startAutoRefresh()">▶️ Auto-refresh ON</button>
-    <button class="stop-btn" onclick="stopAutoRefresh()">⏹️ Auto-refresh OFF</button>
-</div>
 </div>
 
 <script>
@@ -370,7 +389,9 @@ function updateData() {{
         document.getElementById('activos').textContent = data.activos;
         document.getElementById('entradas').textContent = data.entradas;
         document.getElementById('salidas').textContent = data.salidas;
-        document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+        document.getElementById('cpu_usage').textContent = data.cpu_usage.toFixed(1) + '%';
+        document.getElementById('ram_usage').textContent = data.ram_usage.toFixed(1) + '%';
+        document.getElementById('cpu_temp').textContent = data.cpu_temp.toFixed(1) + '°C';
 
         const scaledTracks = data.tracks_activos.map(t => {{
             return {{
@@ -398,6 +419,7 @@ startAutoRefresh();
 </body>
 </html>
 """
+
 
 
 @app.route("/")
