@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+Sistema de detección de personas con rpicam-vid
+- Procesa frames JPEG desde stdout
+- Procesa inferencias desde stderr
+- Muestra video en tiempo real en el navegador
+"""
 import subprocess
 import threading
 import time
@@ -108,65 +114,135 @@ def procesar_inferencia(line):
     limpiar_tracks()
 
 
-def procesar_video(line):
-    """Procesa línea de video; aquí se podrían extraer frames JPEG si se necesita"""
+def procesar_video(frame_data):
+    """Procesa frame JPEG de video"""
     global latest_frame
-    # Por ahora solo placeholder, en el futuro podemos extraer frame
-    latest_frame = line  # opcional: guardar referencia al frame o número
+    
+    # Verificar que sea un frame JPEG válido
+    if (isinstance(frame_data, bytes) and 
+        len(frame_data) > 1000 and 
+        frame_data.startswith(b'\xff\xd8') and 
+        frame_data.endswith(b'\xff\xd9')):
+        
+        latest_frame = frame_data
+        print(f"📹 Frame JPEG válido procesado: {len(frame_data)} bytes", file=sys.stderr)
+    else:
+        print(f"⚠️ Frame inválido ignorado: {type(frame_data)}, tamaño: {len(frame_data) if isinstance(frame_data, bytes) else 'N/A'}", file=sys.stderr)
 
 
 def rpicam_hello_reader():
     global latest_frame
 
+    # Un solo comando que maneja tanto video como inferencias
     cmd = [
         "rpicam-vid",
         "-n",  # sin preview
-        "-t",
-        "0",  # tiempo infinito
+        "-t", "0",  # tiempo infinito
         "--post-process-file",
         "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json",
-        "-v",
-        "2",  # verbose para inferencias
+        "-v", "2",  # verbose para inferencias
+        "--codec", "mjpeg",
+        "-o", "-",  # salida a stdout
         f"--width={SENSOR_WIDTH}",
         f"--height={SENSOR_HEIGHT}",
     ]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    buffer_block = ""
-    current_type = None
+    print("⏳ Iniciando procesamiento de frames e inferencias...", file=sys.stderr)
 
-    print("⏳ Esperando detecciones y video de rpicam-vid...", file=sys.stderr)
+    # Procesar frames JPEG desde stdout
+    def process_frames():
+        buffer = b''
+        print("📹 Iniciando captura de frames desde stdout...", file=sys.stderr)
+        
+        while True:
+            try:
+                # Leer chunks de datos del stream
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                
+                buffer += chunk
+                
+                # Buscar frames JPEG completos en el buffer
+                while True:
+                    # Buscar inicio de frame JPEG (0xFF 0xD8)
+                    start_pos = buffer.find(b'\xff\xd8')
+                    if start_pos == -1:
+                        # No hay inicio de frame, mantener solo el último byte por si es 0xFF
+                        if buffer and buffer[-1] == 0xff:
+                            buffer = buffer[-1:]
+                        else:
+                            buffer = b''
+                        break
+                    
+                    # Buscar fin de frame JPEG (0xFF 0xD9) después del inicio
+                    end_pos = buffer.find(b'\xff\xd9', start_pos + 2)
+                    if end_pos == -1:
+                        # No hay fin de frame, mantener desde el inicio
+                        buffer = buffer[start_pos:]
+                        break
+                    
+                    # Extraer frame completo
+                    frame_data = buffer[start_pos:end_pos + 2]
+                    if len(frame_data) > 1000:  # Verificar que el frame tenga un tamaño mínimo
+                        procesar_video(frame_data)
+                    
+                    # Remover frame procesado del buffer
+                    buffer = buffer[end_pos + 2:]
+                    
+            except Exception as e:
+                print(f"❌ Error en process_frames: {e}", file=sys.stderr)
+                time.sleep(0.1)
 
-    while True:
-        line = proc.stderr.readline()
-        if not line:
-            continue
-        line = line.decode("utf-8").strip()
+    # Procesar inferencias desde stderr
+    def process_inferences():
+        buffer_block = ""
+        current_type = None
+        print("🔍 Iniciando procesamiento de inferencias desde stderr...", file=sys.stderr)
+        
+        while True:
+            line = proc.stderr.readline()
+            if not line:
+                break
+            line = line.decode("utf-8").strip()
 
-        # Detectar bloque de video
-        if line.startswith("Viewfinder frame"):
-            if buffer_block and current_type:
-                if current_type == "video":
-                    procesar_video(buffer_block)
-                elif current_type == "inferencia":
-                    procesar_inferencia(buffer_block)
-            buffer_block = line + "\n"
-            current_type = "video"
+            # Detectar bloque de video
+            if line.startswith("Viewfinder frame"):
+                if buffer_block and current_type:
+                    if current_type == "video":
+                        procesar_video(buffer_block)
+                    elif current_type == "inferencia":
+                        procesar_inferencia(buffer_block)
+                buffer_block = line + "\n"
+                current_type = "video"
 
-        # Detectar bloque de inferencia
-        elif "Number of objects detected:" in line or line.startswith("[0] : person"):
-            if buffer_block and current_type:
-                if current_type == "video":
-                    procesar_video(buffer_block)
-                elif current_type == "inferencia":
-                    procesar_inferencia(buffer_block)
-            buffer_block = line + "\n"
-            current_type = "inferencia"
+            # Detectar bloque de inferencia
+            elif "Number of objects detected:" in line or line.startswith("[0] : person"):
+                if buffer_block and current_type:
+                    if current_type == "video":
+                        procesar_video(buffer_block)
+                    elif current_type == "inferencia":
+                        procesar_inferencia(buffer_block)
+                buffer_block = line + "\n"
+                current_type = "inferencia"
 
-        # Acumular líneas de contexto
-        else:
-            buffer_block += line + "\n"
+            # Acumular líneas de contexto
+            else:
+                buffer_block += line + "\n"
+
+    # Ejecutar ambos procesadores en hilos separados
+    import threading
+    frame_thread = threading.Thread(target=process_frames, daemon=True)
+    inference_thread = threading.Thread(target=process_inferences, daemon=True)
+    
+    frame_thread.start()
+    inference_thread.start()
+    
+    # Esperar a que ambos hilos terminen
+    frame_thread.join()
+    inference_thread.join()
 
 
 # ==========================
@@ -320,20 +396,41 @@ def status():
 def generate_video():
     global latest_frame
     while True:
-        if latest_frame is None:
-            time.sleep(0.01)
-            continue
-        with lock:
-            frame = latest_frame
-        yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-        time.sleep(0.03)
+        try:
+            if latest_frame is None:
+                time.sleep(0.01)
+                continue
+            
+            with lock:
+                frame = latest_frame
+                
+            # Verificar que frame sea bytes válidos
+            if not isinstance(frame, bytes) or len(frame) < 100:
+                time.sleep(0.01)
+                continue
+                
+            # Verificar que sea un JPEG válido
+            if not frame.startswith(b'\xff\xd8') or not frame.endswith(b'\xff\xd9'):
+                time.sleep(0.01)
+                continue
+                
+            yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            time.sleep(0.03)  # ~30 FPS
+            
+        except Exception as e:
+            print(f"❌ Error en generate_video: {e}", file=sys.stderr)
+            time.sleep(0.1)
 
 
 @app.route("/video_feed")
 def video_feed():
-    return Response(
-        generate_video(), mimetype="multipart/x-mixed-replace; boundary=frame"
-    )
+    try:
+        return Response(
+            generate_video(), mimetype="multipart/x-mixed-replace; boundary=frame"
+        )
+    except Exception as e:
+        print(f"❌ Error en video_feed: {e}", file=sys.stderr)
+        return "Error en video feed", 500
 
 
 def start_web():
