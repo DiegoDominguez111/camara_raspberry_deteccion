@@ -279,50 +279,50 @@ def rpicam_hello_reader():
 # ==========================
 app = Flask(__name__)
 
-HTML_TEMPLATE = f"""
+HTML_TEMPLATE="""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Contador de Personas y Estado del Sistema</title>
+    <title>Contador de Personas</title>
     <meta charset="utf-8">
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 0; background: #f0f0f0; }}
-        .container {{ display: flex; height: 100vh; }}
-        .sidebar {{
-            width: 250px;
-            background: #333;
-            color: white;
+        body { font-family: Arial, sans-serif; margin: 0; background: #f0f0f0; }
+        .container { display: flex; height: 100vh; }
+
+        /* Barra lateral izquierda */
+        .sidebar {
+            width: 220px;
+            background: #fff;
             padding: 20px;
-            box-sizing: border-box;
+            box-shadow: 2px 0 8px rgba(0,0,0,0.1);
             display: flex;
             flex-direction: column;
             justify-content: flex-start;
-        }}
-        .sidebar h2 {{ margin-top: 0; color: #ffcc00; }}
-        .stat-box {{ background: #444; padding: 15px; margin-bottom: 15px; border-radius: 8px; text-align: center; }}
-        .stat-box .number {{ font-size: 2em; font-weight: bold; display: block; }}
-        .stat-box .label {{ font-size: 1em; margin-top: 5px; }}
-        .content {{
+        }
+        .stat-box { margin-bottom: 20px; padding: 15px; border-radius: 8px; text-align: center; }
+        .stat-box .number { font-size: 2em; font-weight: bold; display: block; }
+        .activos { background: #e3f2fd; color: #1976d2; }
+        .entradas { background: #e8f5e8; color: #388e3c; }
+        .salidas { background: #fff3e0; color: #f57c00; }
+        .cpu { background: #fce4ec; color: #d81b60; }
+        .ram { background: #ede7f6; color: #5e35b1; }
+        .temp { background: #fff9c4; color: #fbc02d; }
+
+        /* Contenedor derecho */
+        .main {
             flex-grow: 1;
             padding: 20px;
             display: flex;
             flex-direction: column;
             align-items: center;
-            overflow-y: auto;
-        }}
-        canvas {{ border: 2px solid #333; background: #000; margin-bottom: 20px; }}
-        .video-feed {{ border: 2px solid #333; }}
-        .refresh-buttons {{ margin-top: 20px; text-align: center; }}
-        button {{ padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }}
-        .refresh-btn {{ background: #2196f3; color: white; }}
-        .auto-btn {{ background: #4caf50; color: white; }}
-        .stop-btn {{ background: #f44336; color: white; }}
+        }
+        canvas { border: 2px solid #333; background: #000; margin-bottom: 20px; }
+        .video-feed { border: 2px solid #333; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="sidebar">
-        <h2>📊 Estadísticas</h2>
         <div class="stat-box activos">
             <span class="number" id="activos">0</span>
             <span class="label">Personas Activas</span>
@@ -337,55 +337,56 @@ HTML_TEMPLATE = f"""
         </div>
         <div class="stat-box cpu">
             <span class="number" id="cpu_usage">0%</span>
-            <span class="label">CPU Usage</span>
+            <span class="label">CPU Uso</span>
         </div>
         <div class="stat-box ram">
             <span class="number" id="ram_usage">0%</span>
-            <span class="label">RAM Usage</span>
+            <span class="label">RAM Uso</span>
         </div>
         <div class="stat-box temp">
             <span class="number" id="cpu_temp">0°C</span>
             <span class="label">CPU Temp</span>
         </div>
-        <div class="refresh-buttons">
-            <button class="refresh-btn" onclick="refreshData()">🔄 Actualizar</button>
-            <button class="auto-btn" onclick="startAutoRefresh()">▶️ Auto ON</button>
-            <button class="stop-btn" onclick="stopAutoRefresh()">⏹️ Auto OFF</button>
-        </div>
     </div>
-    <div class="content">
-        <canvas id="camCanvas" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}"></canvas>
-        <img id="videoFeed" class="video-feed" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}" src="/video_feed" />
+
+    <div class="main">
+        <canvas id="camCanvas" width="640" height="480"></canvas>
+        <img id="videoFeed" class="video-feed" width="640" height="480" src="/video_feed" />
     </div>
 </div>
 
 <script>
-let autoRefreshInterval;
+const videoFeed = document.getElementById('videoFeed');
 
-function drawCanvas(tracksData) {{
+function drawCanvas(tracksData) {
     const canvas = document.getElementById('camCanvas');
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Línea central
     ctx.strokeStyle = 'red';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo({CANVAS_WIDTH//2}, 0);
-    ctx.lineTo({CANVAS_WIDTH//2}, canvas.height);
+    ctx.moveTo(canvas.width/2, 0);
+    ctx.lineTo(canvas.width/2, canvas.height);
     ctx.stroke();
 
+    // Dibujar tracks
     ctx.fillStyle = 'lime';
-    tracksData.forEach(track => {{
+    tracksData.forEach(track => {
         ctx.beginPath();
         ctx.arc(track.cx, track.cy, 10, 0, 2 * Math.PI);
         ctx.fill();
-    }});
-}}
+    });
+}
 
-function updateData() {{
-    fetch('/status')
-    .then(response => response.json())
-    .then(data => {{
+// Función que dibuja el canvas sincronizado con cada frame
+async function updateCanvasWithFrame() {
+    try {
+        const response = await fetch('/status');
+        const data = await response.json();
+
+        // Actualizar métricas
         document.getElementById('activos').textContent = data.activos;
         document.getElementById('entradas').textContent = data.entradas;
         document.getElementById('salidas').textContent = data.salidas;
@@ -393,28 +394,27 @@ function updateData() {{
         document.getElementById('ram_usage').textContent = data.ram_usage.toFixed(1) + '%';
         document.getElementById('cpu_temp').textContent = data.cpu_temp.toFixed(1) + '°C';
 
-        const scaledTracks = data.tracks_activos.map(t => {{
-            return {{
-                cx: Math.round(t.cx * {SCALE_X}),
-                cy: Math.round(t.cy * {SCALE_Y})
-            }};
-        }});
+        // Escalar tracks para el canvas
+        const scaledTracks = data.tracks_activos.map(t => {
+            return {
+                cx: Math.round(t.cx * 640 / 2028),
+                cy: Math.round(t.cy * 480 / 1520)
+            };
+        });
+
         drawCanvas(scaledTracks);
-    }})
-    .catch(error => console.error('Error:', error));
-}}
+    } catch (e) {
+        console.error('Error fetching status:', e);
+    }
 
-function refreshData() {{ updateData(); }}
-function startAutoRefresh() {{
-    if (autoRefreshInterval) clearInterval(autoRefreshInterval);
-    autoRefreshInterval = setInterval(updateData, 1000);
-}}
-function stopAutoRefresh() {{
-    if (autoRefreshInterval) {{ clearInterval(autoRefreshInterval); autoRefreshInterval = null; }}
-}}
+    // Solicitar el siguiente frame
+    requestAnimationFrame(updateCanvasWithFrame);
+}
 
-updateData();
-startAutoRefresh();
+// Iniciar bucle cuando el video se cargue
+videoFeed.onload = () => {
+    updateCanvasWithFrame();
+};
 </script>
 </body>
 </html>
