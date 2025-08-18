@@ -10,7 +10,21 @@ from datetime import datetime
 # ==========================
 # Configuración
 # ==========================
-LINE_X = 320  # línea virtual central (ajustable)
+# Línea de cruce
+LINE_X_SENSOR = 2028 // 2  # ajustar según resolución de inferencia
+
+# Resolución del sensor de la cámara (usar la misma que rpicam-hello)
+SENSOR_WIDTH = 2028   # resolución 2x2 binning
+SENSOR_HEIGHT = 1520
+
+# Canvas para simulación
+CANVAS_WIDTH = 640
+CANVAS_HEIGHT = 480
+
+# Escala para mapear coordenadas
+SCALE_X = CANVAS_WIDTH / SENSOR_WIDTH
+SCALE_Y = CANVAS_HEIGHT / SENSOR_HEIGHT
+
 STALE_TRACK_SEC = 2.0
 MAX_DIST_PX = 120
 
@@ -21,7 +35,7 @@ DET_RE = re.compile(
 # ==========================
 # Estado global
 # ==========================
-tracks = {}        # track_id -> {"cx", "cy", "last_side", "last_seen"}
+tracks = {}
 next_id = 0
 total_in = 0
 total_out = 0
@@ -50,7 +64,6 @@ def asignar_id(cx, cy):
             t["last_seen"] = now
             return best_tid
 
-        # crear nuevo ID
         tid = next_id
         next_id += 1
         tracks[tid] = {"cx": cx, "cy": cy, "last_side": "?", "last_seen": now}
@@ -72,7 +85,8 @@ def rpicam_hello_reader():
         "rpicam-hello",
         "-n", "-t", "0", "-v", "2",
         "--post-process-file", "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json",
-        "--lores-width", "640", "--lores-height", "480"
+        f"--lores-width={SENSOR_WIDTH}",
+        f"--lores-height={SENSOR_HEIGHT}"
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
     print("⏳ Esperando detecciones de rpicam-hello...", file=sys.stderr)
@@ -98,8 +112,8 @@ def rpicam_hello_reader():
         cx = x + w // 2
         cy = y + h // 2
         tid = asignar_id(cx, cy)
-        side = "L" if cx < LINE_X else "R"
-        
+        side = "L" if cx < LINE_X_SENSOR else "R"
+
         with lock:
             last_side = tracks[tid]["last_side"]
             if last_side != "?" and last_side != side:
@@ -110,135 +124,137 @@ def rpicam_hello_reader():
                     total_out += 1
                     print(f"🚶 SALIDA detectada! Total salidas: {total_out}")
                 last_update = time.time()
-            
+
             tracks[tid]["last_side"] = side
             tracks[tid]["last_seen"] = time.time()
-        
+
         limpiar_tracks()
 
-        # DEBUG consola
         with lock:
             activos = len(tracks)
             print(f"[DEBUG] Persona ID={tid}, cx={cx}, cy={cy}, lado={side}, conf={conf:.2f}")
             print(f"👥 Activos={activos} | Entradas={total_in} | Salidas={total_out}")
 
 # ==========================
-# Servidor web
+# Servidor web con canvas
 # ==========================
 app = Flask(__name__)
 
-# HTML con canvas para simular cámara y dibujar tracks
-HTML_TEMPLATE = """
+HTML_TEMPLATE = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <title>Contador de Personas</title>
     <meta charset="utf-8">
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .stats { display: flex; justify-content: space-around; margin: 30px 0; }
-        .stat-box { text-align: center; padding: 20px; border-radius: 8px; }
-        .activos { background: #e3f2fd; color: #1976d2; }
-        .entradas { background: #e8f5e8; color: #388e3c; }
-        .salidas { background: #fff3e0; color: #f57c00; }
-        .number { font-size: 2.5em; font-weight: bold; display: block; }
-        .label { font-size: 1.2em; margin-top: 5px; }
-        .last-update { text-align: center; color: #666; margin-top: 20px; }
-        canvas { border: 2px solid #333; display: block; margin: 20px auto; }
-        .auto-refresh { text-align: center; margin-top: 20px; }
-        button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
-        .refresh-btn { background: #2196f3; color: white; }
-        .auto-btn { background: #4caf50; color: white; }
-        .stop-btn { background: #f44336; color: white; }
+        body {{ font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }}
+        .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .stats {{ display: flex; justify-content: space-around; margin: 30px 0; }}
+        .stat-box {{ text-align: center; padding: 20px; border-radius: 8px; }}
+        .activos {{ background: #e3f2fd; color: #1976d2; }}
+        .entradas {{ background: #e8f5e8; color: #388e3c; }}
+        .salidas {{ background: #fff3e0; color: #f57c00; }}
+        .number {{ font-size: 2.5em; font-weight: bold; display: block; }}
+        .label {{ font-size: 1.2em; margin-top: 5px; }}
+        .last-update {{ text-align: center; color: #666; margin-top: 20px; }}
+        canvas {{ border: 2px solid #333; background: #000; display: block; margin: 20px auto; }}
+        .auto-refresh {{ text-align: center; margin-top: 20px; }}
+        button {{ padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }}
+        .refresh-btn {{ background: #2196f3; color: white; }}
+        .auto-btn {{ background: #4caf50; color: white; }}
+        .stop-btn {{ background: #f44336; color: white; }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>📊 Contador de Personas en Tiempo Real</h1>
-        
-        <div class="stats">
-            <div class="stat-box activos">
-                <span class="number" id="activos">0</span>
-                <span class="label">Personas Activas</span>
-            </div>
-            <div class="stat-box entradas">
-                <span class="number" id="entradas">0</span>
-                <span class="label">Entradas</span>
-            </div>
-            <div class="stat-box salidas">
-                <span class="number" id="salidas">0</span>
-                <span class="label">Salidas</span>
-            </div>
-        </div>
+<div class="container">
+<h1>📊 Contador de Personas en Tiempo Real</h1>
 
-        <canvas id="camCanvas" width="640" height="480"></canvas>
-
-        <div class="last-update">
-            <p>Última actualización: <span id="last-update">-</span></p>
-        </div>
-        
-        <div class="auto-refresh">
-            <button class="refresh-btn" onclick="refreshData()">🔄 Actualizar Manual</button>
-            <button class="auto-btn" onclick="startAutoRefresh()">▶️ Auto-refresh ON</button>
-            <button class="stop-btn" onclick="stopAutoRefresh()">⏹️ Auto-refresh OFF</button>
-        </div>
+<div class="stats">
+    <div class="stat-box activos">
+        <span class="number" id="activos">0</span>
+        <span class="label">Personas Activas</span>
     </div>
+    <div class="stat-box entradas">
+        <span class="number" id="entradas">0</span>
+        <span class="label">Entradas</span>
+    </div>
+    <div class="stat-box salidas">
+        <span class="number" id="salidas">0</span>
+        <span class="label">Salidas</span>
+    </div>
+</div>
 
-    <script>
-        let autoRefreshInterval;
+<canvas id="camCanvas" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}"></canvas>
 
-        function drawCanvas(tracksData) {
-            const canvas = document.getElementById('camCanvas');
-            const ctx = canvas.getContext('2d');
+<div class="last-update">
+    <p>Última actualización: <span id="last-update">-</span></p>
+</div>
 
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+<div class="auto-refresh">
+    <button class="refresh-btn" onclick="refreshData()">🔄 Actualizar Manual</button>
+    <button class="auto-btn" onclick="startAutoRefresh()">▶️ Auto-refresh ON</button>
+    <button class="stop-btn" onclick="stopAutoRefresh()">⏹️ Auto-refresh OFF</button>
+</div>
+</div>
 
-            // Línea de cruce
-            ctx.strokeStyle = 'red';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(320, 0); 
-            ctx.lineTo(320, canvas.height);
-            ctx.stroke();
+<script>
+let autoRefreshInterval;
 
-            // Dibujar tracks activos
-            ctx.fillStyle = 'lime';
-            tracksData.forEach(track => {
-                ctx.beginPath();
-                ctx.arc(track.cx, track.cy, 8, 0, 2 * Math.PI);
-                ctx.fill();
-            });
-        }
+function drawCanvas(tracksData) {{
+    const canvas = document.getElementById('camCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        function updateData() {
-        fetch('/status')
-        .then(response => response.json())
-        .then(data => {
-            document.getElementById('activos').textContent = data.activos;
-            document.getElementById('entradas').textContent = data.entradas;
-            document.getElementById('salidas').textContent = data.salidas;
-            document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+    // Línea de cruce
+    ctx.strokeStyle = 'red';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo({CANVAS_WIDTH//2}, 0);
+    ctx.lineTo({CANVAS_WIDTH//2}, canvas.height);
+    ctx.stroke();
 
-            // dibujar directamente usando los datos recibidos
-            drawCanvas(data.tracks_activos);
-        })
-        .catch(error => console.error('Error:', error));
-}
+    // Dibujar tracks activos
+    ctx.fillStyle = 'lime';
+    tracksData.forEach(track => {{
+        ctx.beginPath();
+        ctx.arc(track.cx, track.cy, 10, 0, 2 * Math.PI);
+        ctx.fill();
+    }});
+}}
 
+function updateData() {{
+    fetch('/status')
+    .then(response => response.json())
+    .then(data => {{
+        document.getElementById('activos').textContent = data.activos;
+        document.getElementById('entradas').textContent = data.entradas;
+        document.getElementById('salidas').textContent = data.salidas;
+        document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
 
-        function refreshData() { updateData(); }
-        function startAutoRefresh() {
-            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
-            autoRefreshInterval = setInterval(updateData, 1000);
-        }
-        function stopAutoRefresh() {
-            if (autoRefreshInterval) { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
-        }
+        // Escalar coordenadas para el canvas
+        const scaledTracks = data.tracks_activos.map(t => {{
+            return {{
+                cx: Math.round(t.cx * {SCALE_X}),
+                cy: Math.round(t.cy * {SCALE_Y})
+            }};
+        }});
+        drawCanvas(scaledTracks);
+    }})
+    .catch(error => console.error('Error:', error));
+}}
 
-        updateData();
-        startAutoRefresh();
-    </script>
+function refreshData() {{ updateData(); }}
+function startAutoRefresh() {{
+    if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+    autoRefreshInterval = setInterval(updateData, 1000);
+}}
+function stopAutoRefresh() {{
+    if (autoRefreshInterval) {{ clearInterval(autoRefreshInterval); autoRefreshInterval = null; }}
+}}
+
+updateData();
+startAutoRefresh();
+</script>
 </body>
 </html>
 """
@@ -247,21 +263,10 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route("/counts")
-def counts():
-    with lock:
-        return jsonify({
-            "activos": len(tracks),
-            "entradas": total_in,
-            "salidas": total_out,
-            "timestamp": last_update
-        })
-
-# endpoint /status
 @app.route("/status")
 def status():
     with lock:
-        tracks_pos = [{"cx": int(t["cx"]), "cy": int(t["cy"])} for t in tracks.values()]
+        tracks_pos = [{"cx": t["cx"], "cy": t["cy"]} for t in tracks.values()]
         return jsonify({
             "activos": len(tracks),
             "entradas": total_in,
@@ -280,17 +285,14 @@ def start_web():
 def main():
     print("🚀 Iniciando sistema de detección de personas...", file=sys.stderr)
     
-    # Hilo del rpicam-hello
     t_rpi = threading.Thread(target=rpicam_hello_reader, daemon=True)
     t_rpi.start()
     print("📹 Hilo de detección iniciado", file=sys.stderr)
 
-    # Hilo servidor web
     t_web = threading.Thread(target=start_web, daemon=True)
     t_web.start()
     print("🌐 Hilo del servidor web iniciado", file=sys.stderr)
 
-    # Mantener script principal vivo
     try:
         while True:
             time.sleep(1)
