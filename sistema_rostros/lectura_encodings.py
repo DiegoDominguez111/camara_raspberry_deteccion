@@ -451,41 +451,136 @@ def procesar_reconocimiento_facial(frame_data):
                 except:
                     continue
             
-            # Dibujar en frame de display
-            color = (0, 255, 0) if name != "Desconocido" else (0, 0, 255)
-            
             # Escalar coordenadas para display
             display_left = int(left * SCALE_X)
             display_right = int(right * SCALE_X)
             display_top = int(top * SCALE_Y)
             display_bottom = int(bottom * SCALE_Y)
             
-            # Dibujar rectángulo
-            cv2.rectangle(display_frame, (display_left, display_top), 
-                         (display_right, display_bottom), color, 2)
-            
-            # Preparar texto
+            # Configurar colores y estilos según el estado
             if name != "Desconocido":
+                # Persona reconocida - Verde profesional
+                box_color = (0, 150, 0)  # Verde más suave
+                text_color = (255, 255, 255)  # Texto blanco
+                bg_color = (0, 100, 0)  # Fondo verde oscuro
+                thickness = 2
                 text = f"{name} ({confidence:.1f}%)"
                 save_detection(name, confidence)
             else:
-                text = "Desconocido"
+                # Persona desconocida - Rojo reservado
+                box_color = (0, 0, 200)  # Rojo más suave
+                text_color = (255, 255, 255)  # Texto blanco
+                bg_color = (0, 0, 120)  # Fondo rojo oscuro
+                thickness = 3  # Más grueso para desconocidos
+                text = "DESCONOCIDO"
             
-            # Dibujar texto con fondo
-            font = cv2.FONT_HERSHEY_SIMPLEX
+            # Dibujar box principal con esquinas redondeadas simuladas
+            box_width = display_right - display_left
+            box_height = display_bottom - display_top
+            
+            # Box principal
+            cv2.rectangle(display_frame, (display_left, display_top), 
+                         (display_right, display_bottom), box_color, thickness)
+            
+            # Esquinas decorativas (pequeños cuadrados en las esquinas)
+            corner_size = 8
+            # Esquina superior izquierda
+            cv2.rectangle(display_frame, (display_left, display_top), 
+                         (display_left + corner_size, display_top + corner_size), box_color, -1)
+            # Esquina superior derecha
+            cv2.rectangle(display_frame, (display_right - corner_size, display_top), 
+                         (display_right, display_top + corner_size), box_color, -1)
+            # Esquina inferior izquierda
+            cv2.rectangle(display_frame, (display_left, display_bottom - corner_size), 
+                         (display_left + corner_size, display_bottom), box_color, -1)
+            # Esquina inferior derecha
+            cv2.rectangle(display_frame, (display_right - corner_size, display_bottom - corner_size), 
+                         (display_right, display_bottom), box_color, -1)
+            
+            # Preparar etiqueta de nombre
+            font = cv2.FONT_HERSHEY_DUPLEX  # Fuente más legible
             font_scale = 0.6
-            text_size = cv2.getTextSize(text, font, font_scale, 1)[0]
+            font_thickness = 1
             
-            text_bg_bottom = display_top - 10
-            text_bg_top = text_bg_bottom - text_size[1] - 10
+            # Calcular dimensiones del texto
+            text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
+            text_width = text_size[0]
+            text_height = text_size[1]
+            
+            # Calcular posición de la etiqueta (arriba del box)
+            label_y = max(display_top - 15, text_height + 10)  # Evitar que se salga de la pantalla
+            label_x = display_left
+            
+            # Padding para la etiqueta
+            padding_x = 8
+            padding_y = 4
+            
+            # Dibujar fondo de la etiqueta
+            label_bg_left = label_x
+            label_bg_right = label_x + text_width + padding_x * 2
+            label_bg_top = label_y - text_height - padding_y
+            label_bg_bottom = label_y + padding_y
+            
+            # Fondo principal de la etiqueta
             cv2.rectangle(display_frame, 
-                         (display_left, text_bg_top), 
-                         (display_left + text_size[0] + 10, text_bg_bottom), 
-                         color, -1)
+                         (label_bg_left, label_bg_top), 
+                         (label_bg_right, label_bg_bottom), 
+                         bg_color, -1)
             
+            # Borde de la etiqueta
+            cv2.rectangle(display_frame, 
+                         (label_bg_left, label_bg_top), 
+                         (label_bg_right, label_bg_bottom), 
+                         box_color, 1)
+            
+            # Línea conectora entre etiqueta y box
+            line_start_y = label_bg_bottom
+            line_end_y = display_top
+            line_x = label_x + padding_x + text_width // 2
+            
+            cv2.line(display_frame, (line_x, line_start_y), (line_x, line_end_y), box_color, 1)
+            
+            # Dibujar texto centrado en la etiqueta
+            text_x = label_x + padding_x
+            text_y = label_y - padding_y // 2
+            
+            # Sombra del texto para mejor legibilidad
             cv2.putText(display_frame, text, 
-                       (display_left + 5, display_top - 15), 
-                       font, font_scale, (255, 255, 255), 1)
+                       (text_x + 1, text_y + 1), 
+                       font, font_scale, (0, 0, 0), font_thickness)
+            
+            # Texto principal
+            cv2.putText(display_frame, text, 
+                       (text_x, text_y), 
+                       font, font_scale, text_color, font_thickness)
+            
+            # Indicador de confianza para personas reconocidas
+            if name != "Desconocido":
+                # Barra de confianza
+                confidence_bar_width = 60
+                confidence_bar_height = 4
+                confidence_bar_x = display_left
+                confidence_bar_y = display_bottom + 8
+                
+                # Fondo de la barra
+                cv2.rectangle(display_frame, 
+                             (confidence_bar_x, confidence_bar_y), 
+                             (confidence_bar_x + confidence_bar_width, confidence_bar_y + confidence_bar_height), 
+                             (50, 50, 50), -1)
+                
+                # Barra de confianza (verde)
+                confidence_width = int((confidence / 100.0) * confidence_bar_width)
+                if confidence_width > 0:
+                    cv2.rectangle(display_frame, 
+                                 (confidence_bar_x, confidence_bar_y), 
+                                 (confidence_bar_x + confidence_width, confidence_bar_y + confidence_bar_height), 
+                                 (0, 200, 0), -1)
+                
+                # Borde de la barra
+                cv2.rectangle(display_frame, 
+                             (confidence_bar_x, confidence_bar_y), 
+                             (confidence_bar_x + confidence_bar_width, confidence_bar_y + confidence_bar_height), 
+                             (100, 100, 100), 1)
             
             detections.append({
                 "name": name,
