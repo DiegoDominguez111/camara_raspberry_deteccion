@@ -1,0 +1,26 @@
+# Dependencias para el sistema de detección de personas con Raspberry Pi AI Camera IMX500
+# Script: lectura_mobilessd.py
+
+# Framework web para la interfaz de usuario
+Flask==2.3.3
+
+# Monitoreo de sistema (CPU, RAM, temperatura)
+psutil==5.9.6
+
+# Nota: Las siguientes dependencias son parte de la biblioteca estándar de Python
+# y no necesitan ser instaladas por pip:
+# - subprocess (built-in)
+# - threading (built-in)
+# - time (built-in)
+# - sys (built-in)
+# - re (built-in)
+# - datetime (built-in)
+# - os (built-in)
+
+# Dependencias opcionales para desarrollo (comentadas)
+# Werkzeug==2.3.7  # Dependencia de Flask
+# Jinja2==3.1.2    # Motor de plantillas de Flask
+# MarkupSafe==2.1.3  # Dependencia de Jinja2
+# click==8.1.7     # Dependencia de Flask
+# itsdangerous==2.1.2  # Dependencia de Flask
+# blinker==1.6.3   # Dependencia de Flask 
