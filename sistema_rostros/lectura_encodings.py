@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sistema de reconocimiento facial con rpicam-vid y registro desde web
+Sistema de reconocimiento facial tipo reloj checador optimizado para bajo consumo de CPU
 """
 import subprocess
 import threading
@@ -16,12 +16,14 @@ import os
 import base64
 from collections import deque
 import queue
+from datetime import datetime
+import gc
 
 # ==========================
-# Configuración
+# Configuración Optimizada
 # ==========================
-SENSOR_WIDTH = 2028
-SENSOR_HEIGHT = 1520
+SENSOR_WIDTH = 1640  # Reducido para mejor rendimiento
+SENSOR_HEIGHT = 1232
 CANVAS_WIDTH = 640
 CANVAS_HEIGHT = 480
 SCALE_X = CANVAS_WIDTH / SENSOR_WIDTH
@@ -29,28 +31,41 @@ SCALE_Y = CANVAS_HEIGHT / SENSOR_HEIGHT
 
 DB_PATH = "faces.db"
 latest_frame = None
+latest_recognition_frame = None
 lock = threading.Lock()
+recognition_lock = threading.Lock()
 
-# Colas para separar procesamiento de video y reconocimiento facial
-video_queue = queue.Queue(maxsize=30)  # Aumentado para más frames
-face_queue = queue.Queue(maxsize=10)   # Cola de frames para reconocimiento facial
+# Colas separadas para video rápido y reconocimiento lento
+video_queue = queue.Queue(maxsize=5)  # Solo para video rápido
+recognition_queue = queue.Queue(maxsize=2)  # Solo para reconocimiento
+
+# Cache para rostros conocidos
+known_faces_cache = []
+last_face_update = 0
+FACE_UPDATE_INTERVAL = 10  # Actualizar cada 10 segundos
+
+# Resultados de reconocimiento
+current_detections = []
+detection_lock = threading.Lock()
 
 cpu_usage = 0.0
 ram_usage = 0.0
 cpu_temp = 0.0
 
 # Control de FPS optimizado
-TARGET_FPS = 25  # Reducido para mejor rendimiento
-FRAME_INTERVAL = 1.0 / TARGET_FPS
+VIDEO_FPS = 25  # FPS para video puro
+RECOGNITION_FPS = 2  # FPS para reconocimiento (mucho más lento)
+VIDEO_INTERVAL = 1.0 / VIDEO_FPS
+RECOGNITION_INTERVAL = 1.0 / RECOGNITION_FPS
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Reconocimiento Facial</title>
+    <title>Sistema de Chequeo Facial</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
-        .container { max-width: 800px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .container { max-width: 1000px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         .video-container { text-align: center; margin: 20px 0; }
         .form-container { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; background-color: #fafafa; }
         input[type="text"] { padding: 10px; margin-right: 10px; width: 250px; border: 1px solid #ddd; border-radius: 3px; }
@@ -64,24 +79,46 @@ HTML_TEMPLATE = """
         .message { margin-top: 10px; padding: 10px; border-radius: 3px; }
         .message.success { background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
         .message.error { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+        .message.warning { background-color: #fff3cd; border: 1px solid #ffeaa7; color: #856404; }
+        .recognition-info { margin: 20px 0; padding: 15px; background-color: #d1ecf1; border: 1px solid #bee5eb; border-radius: 5px; }
+        .recognition-info h3 { margin-top: 0; color: #0c5460; }
+        .person-item { padding: 8px; margin: 5px 0; background-color: white; border-radius: 3px; border-left: 4px solid #007bff; }
+        .person-name { font-weight: bold; color: #007bff; }
+        .person-time { color: #6c757d; font-size: 0.9em; }
+        .person-confidence { color: #28a745; font-weight: bold; }
+        .fps-info { margin: 10px 0; color: #6c757d; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎥 Sistema de Reconocimiento Facial</h1>
+        <h1>🕐 Sistema de Chequeo Facial (Optimizado)</h1>
         
         <div class="video-container">
-            <h2>Video en Tiempo Real</h2>
-            <img src="{{ url_for('video_feed') }}" width="640" height="480" style="border: 3px solid #007bff; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);"/>
+            <h2>📹 Cámara en Tiempo Real</h2>
+            <div style="position: relative; display: inline-block;">
+                <img id="videoStream" src="{{ url_for('video_feed') }}" width="640" height="480" style="border: 3px solid #007bff; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);"/>
+                <img id="recognitionOverlay" src="{{ url_for('recognition_feed') }}" width="640" height="480" style="position: absolute; top: 0; left: 0; pointer-events: none; opacity: 0.9;"/>
+            </div>
+            <div class="fps-info">
+                📊 Video: <span id="videoFps">--</span> FPS | Reconocimiento: <span id="recognitionFps">--</span> FPS
+            </div>
+            <p><em>Video fluido + Reconocimiento facial superpuesto</em></p>
         </div>
         
         <div class="form-container">
-            <h2>📝 Registrar Rostro Desconocido</h2>
+            <h2>📝 Registrar Persona Desconocida</h2>
             <form id="registerForm">
-                <input type="text" id="name" placeholder="Nombre de la persona" required>
-                <button type="submit">Registrar Rostro</button>
+                <input type="text" id="name" placeholder="Nombre completo de la persona" required>
+                <button type="submit" id="registerBtn">Registrar Persona</button>
             </form>
             <div id="message"></div>
+        </div>
+        
+        <div class="recognition-info">
+            <h3>👥 Personas Detectadas Recientemente</h3>
+            <div id="recentDetections">
+                <p>Esperando detecciones...</p>
+            </div>
         </div>
         
         <div class="status">
@@ -95,25 +132,65 @@ HTML_TEMPLATE = """
     <script>
         const form = document.getElementById('registerForm');
         const messageDiv = document.getElementById('message');
+        const registerBtn = document.getElementById('registerBtn');
+        const recentDetectionsDiv = document.getElementById('recentDetections');
+        
+        // Verificar si una persona ya está registrada
+        async function checkPersonExists(name) {
+            try {
+                const res = await fetch('/check_person', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({name: name})
+                });
+                const result = await res.json();
+                return result.exists;
+            } catch (error) {
+                console.error('Error verificando persona:', error);
+                return false;
+            }
+        }
         
         form.addEventListener('submit', async e => {
             e.preventDefault();
-            const name = document.getElementById('name').value;
+            const name = document.getElementById('name').value.trim();
+            
+            if (name.length < 2) {
+                messageDiv.innerHTML = `<div class="message error">❌ El nombre debe tener al menos 2 caracteres</div>`;
+                return;
+            }
+            
             const button = form.querySelector('button');
             const originalText = button.textContent;
             
-            button.textContent = 'Procesando...';
+            button.textContent = 'Verificando...';
             button.disabled = true;
             
             try {
-                // Capturar frame actual del video
-                const video_img = document.querySelector('img');
+                // Verificar si la persona ya existe
+                const exists = await checkPersonExists(name);
+                if (exists) {
+                    messageDiv.innerHTML = `<div class="message warning">⚠️ La persona '${name}' ya está registrada en el sistema</div>`;
+                    return;
+                }
+                
+                button.textContent = 'Capturando rostro...';
+                
+                // Esperar un momento para asegurar que hay un frame disponible
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Usar canvas para capturar frame del video de reconocimiento
+                const recognitionImg = document.getElementById('recognitionOverlay');
                 const canvas = document.createElement('canvas');
-                canvas.width = video_img.width;
-                canvas.height = video_img.height;
+                canvas.width = 640;
+                canvas.height = 480;
                 const ctx = canvas.getContext('2d');
-                ctx.drawImage(video_img, 0, 0, canvas.width, canvas.height);
-                const dataURL = canvas.toDataURL('image/jpeg');
+                
+                // Dibujar la imagen de reconocimiento en el canvas
+                ctx.drawImage(recognitionImg, 0, 0, 640, 480);
+                const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+                
+                button.textContent = 'Registrando...';
                 
                 const res = await fetch('/register_face', {
                     method: 'POST',
@@ -126,6 +203,7 @@ HTML_TEMPLATE = """
                 if (result.success) {
                     messageDiv.innerHTML = `<div class="message success">✅ ${result.message}</div>`;
                     form.reset();
+                    updateRecentDetections();
                 } else {
                     messageDiv.innerHTML = `<div class="message error">❌ ${result.message}</div>`;
                 }
@@ -137,6 +215,38 @@ HTML_TEMPLATE = """
             }
         });
         
+        // Actualizar lista de detecciones recientes
+        async function updateRecentDetections() {
+            try {
+                const res = await fetch('/recent_detections');
+                const data = await res.json();
+                
+                if (data.detections && data.detections.length > 0) {
+                    let html = '';
+                    data.detections.forEach(person => {
+                        const timeStr = new Date(person.timestamp).toLocaleTimeString();
+                        const confidenceColor = person.confidence > 80 ? '#28a745' : 
+                                             person.confidence > 60 ? '#ffc107' : '#dc3545';
+                        
+                        html += `
+                            <div class="person-item">
+                                <div class="person-name">${person.name}</div>
+                                <div class="person-time">🕐 ${timeStr}</div>
+                                <div class="person-confidence" style="color: ${confidenceColor}">
+                                    🎯 ${person.confidence.toFixed(1)}% coincidencia
+                                </div>
+                            </div>
+                        `;
+                    });
+                    recentDetectionsDiv.innerHTML = html;
+                } else {
+                    recentDetectionsDiv.innerHTML = '<p>Esperando detecciones...</p>';
+                }
+            } catch (error) {
+                console.error('Error actualizando detecciones:', error);
+            }
+        }
+        
         // Actualizar métricas del sistema
         async function updateStatus() {
             try {
@@ -145,6 +255,8 @@ HTML_TEMPLATE = """
                 document.getElementById('cpu').textContent = data.cpu_usage.toFixed(1);
                 document.getElementById('ram').textContent = data.ram_usage.toFixed(1);
                 document.getElementById('temp').textContent = data.cpu_temp.toFixed(1);
+                document.getElementById('videoFps').textContent = data.video_fps || '--';
+                document.getElementById('recognitionFps').textContent = data.recognition_fps || '--';
             } catch (error) {
                 console.error('Error actualizando estado:', error);
             }
@@ -152,7 +264,11 @@ HTML_TEMPLATE = """
         
         // Actualizar cada 2 segundos
         setInterval(updateStatus, 2000);
-        updateStatus(); // Actualización inicial
+        setInterval(updateRecentDetections, 5000); // Cada 5 segundos
+        
+        // Actualización inicial
+        updateStatus();
+        updateRecentDetections();
     </script>
 </body>
 </html>
@@ -164,112 +280,246 @@ HTML_TEMPLATE = """
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
+    # Tabla de rostros
     c.execute(
         """CREATE TABLE IF NOT EXISTS faces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            encoding BLOB
+            name TEXT UNIQUE,
+            encoding BLOB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
+    
+    # Tabla de detecciones
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS detections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            confidence REAL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+    
     conn.commit()
     conn.close()
 
 def save_face(name, encoding):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO faces (name, encoding) VALUES (?, ?)", (name, pickle.dumps(encoding)))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO faces (name, encoding) VALUES (?, ?)", (name, pickle.dumps(encoding)))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        print(f"Error guardando rostro: {e}")
+        return False
+
+def check_person_exists(name):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM faces WHERE name = ?", (name,))
+        count = c.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        print(f"Error verificando persona: {e}")
+        return False
 
 def load_faces():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT name, encoding FROM faces")
-    results = [(row[0], pickle.loads(row[1])) for row in c.fetchall()]
-    conn.close()
-    return results
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT name, encoding FROM faces")
+        results = [(row[0], pickle.loads(row[1])) for row in c.fetchall()]
+        conn.close()
+        return results
+    except Exception as e:
+        print(f"Error cargando rostros: {e}")
+        return []
+
+def save_detection(name, confidence):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO detections (name, confidence) VALUES (?, ?)", (name, confidence))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error guardando detección: {e}")
+
+def get_recent_detections(limit=5):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT name, confidence, timestamp FROM detections ORDER BY timestamp DESC LIMIT ?", (limit,))
+        results = [{"name": row[0], "confidence": row[1], "timestamp": row[2]} for row in c.fetchall()]
+        conn.close()
+        return results
+    except Exception as e:
+        print(f"Error obteniendo detecciones: {e}")
+        return []
 
 # ==========================
-# Procesamiento de video optimizado
+# Procesamiento de video SEPARADO
 # ==========================
-face_register_queue = []  # almacenar rostros para registrar desde web
-known_faces_cache = []    # cache de rostros conocidos
-last_face_update = 0      # timestamp de última actualización de rostros
-FACE_UPDATE_INTERVAL = 5  # segundos entre actualizaciones de rostros
+video_fps_counter = 0
+recognition_fps_counter = 0
+last_video_fps_time = time.time()
+last_recognition_fps_time = time.time()
+current_video_fps = 0
+current_recognition_fps = 0
 
 def procesar_video_rapido(frame_data):
-    """Procesa frame JPEG solo para display (sin reconocimiento facial)"""
-    global latest_frame
-    if not isinstance(frame_data, bytes) or len(frame_data) < 1000:
-        return
-
+    """Procesa frames solo para video rápido SIN reconocimiento facial"""
+    global latest_frame, video_fps_counter, current_video_fps, last_video_fps_time
+    
     try:
+        # Decodificar y redimensionar rápidamente
         np_frame = np.frombuffer(frame_data, dtype=np.uint8)
         frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
         if frame is None:
             return
-
-        # Solo redimensionar para display
+        
+        # Solo redimensionar, sin procesamiento
         display_frame = cv2.resize(frame, (CANVAS_WIDTH, CANVAS_HEIGHT))
         
-        # Convertir a JPEG para streaming con calidad optimizada
-        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        # Convertir a JPEG con calidad media para velocidad
+        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         
         with lock:
             latest_frame = jpeg.tobytes()
-            
+        
+        # Contar FPS
+        video_fps_counter += 1
+        current_time = time.time()
+        if current_time - last_video_fps_time >= 1.0:
+            current_video_fps = video_fps_counter
+            video_fps_counter = 0
+            last_video_fps_time = current_time
+        
+        # Limpiar memoria
+        del np_frame, frame, display_frame
+        
     except Exception as e:
-        print(f"Error procesando frame: {e}")
+        print(f"Error en video rápido: {e}")
 
-def procesar_reconocimiento_facial():
-    """Procesa frames para reconocimiento facial en hilo separado"""
-    global known_faces_cache, last_face_update
+def procesar_reconocimiento_facial(frame_data):
+    """Procesa frames SOLO para reconocimiento facial (lento)"""
+    global latest_recognition_frame, current_detections, recognition_fps_counter, current_recognition_fps, last_recognition_fps_time
     
-    while True:
-        try:
-            # Actualizar cache de rostros conocidos periódicamente
-            current_time = time.time()
-            if current_time - last_face_update > FACE_UPDATE_INTERVAL:
-                known_faces_cache = load_faces()
-                last_face_update = current_time
+    try:
+        # Decodificar frame
+        np_frame = np.frombuffer(frame_data, dtype=np.uint8)
+        frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
+        if frame is None:
+            return
+        
+        # Redimensionar para display
+        display_frame = cv2.resize(frame, (CANVAS_WIDTH, CANVAS_HEIGHT))
+        
+        # Redimensionar aún más para reconocimiento (más rápido)
+        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        
+        # Detectar rostros en frame pequeño
+        face_locations = face_recognition.face_locations(rgb_small_frame)
+        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+        
+        # Escalar coordenadas de vuelta
+        face_locations = [(top*2, right*2, bottom*2, left*2) for (top, right, bottom, left) in face_locations]
+        
+        # Procesar detecciones
+        detections = []
+        for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
+            name = "Desconocido"
+            confidence = 0.0
             
-            # Procesar frame de la cola de reconocimiento facial
-            try:
-                frame_data = face_queue.get(timeout=2.0)
-            except queue.Empty:
-                continue
-                
-            if not isinstance(frame_data, bytes) or len(frame_data) < 1000:
-                continue
-                
-            np_frame = np.frombuffer(frame_data, dtype=np.uint8)
-            frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-                
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            face_locations = face_recognition.face_locations(rgb_frame)
-            face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-            
-            # Procesar cada rostro detectado
-            for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
-                name = "Desconocido"
-                for db_name, db_enc in known_faces_cache:
-                    if face_recognition.compare_faces([db_enc], encoding, tolerance=0.5)[0]:
+            # Comparar con rostros conocidos
+            for db_name, db_enc in known_faces_cache:
+                try:
+                    distance = face_recognition.face_distance([db_enc], encoding)[0]
+                    current_confidence = (1 - distance) * 100
+                    
+                    if current_confidence > confidence and current_confidence > 55:  # Umbral más bajo
+                        confidence = current_confidence
                         name = db_name
-                        break
-                
-                # Si desconocido, almacenar para registro web
-                if name == "Desconocido":
-                    with lock:
-                        face_register_queue.append((encoding, (top, right, bottom, left)))
-                        
-        except Exception as e:
-            print(f"Error en reconocimiento facial: {e}")
-            time.sleep(0.1)
+                except:
+                    continue
+            
+            # Dibujar en frame de display
+            color = (0, 255, 0) if name != "Desconocido" else (0, 0, 255)
+            
+            # Escalar coordenadas para display
+            display_left = int(left * SCALE_X)
+            display_right = int(right * SCALE_X)
+            display_top = int(top * SCALE_Y)
+            display_bottom = int(bottom * SCALE_Y)
+            
+            # Dibujar rectángulo
+            cv2.rectangle(display_frame, (display_left, display_top), 
+                         (display_right, display_bottom), color, 2)
+            
+            # Preparar texto
+            if name != "Desconocido":
+                text = f"{name} ({confidence:.1f}%)"
+                save_detection(name, confidence)
+            else:
+                text = "Desconocido"
+            
+            # Dibujar texto con fondo
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            text_size = cv2.getTextSize(text, font, font_scale, 1)[0]
+            
+            text_bg_bottom = display_top - 10
+            text_bg_top = text_bg_bottom - text_size[1] - 10
+            cv2.rectangle(display_frame, 
+                         (display_left, text_bg_top), 
+                         (display_left + text_size[0] + 10, text_bg_bottom), 
+                         color, -1)
+            
+            cv2.putText(display_frame, text, 
+                       (display_left + 5, display_top - 15), 
+                       font, font_scale, (255, 255, 255), 1)
+            
+            detections.append({
+                "name": name,
+                "confidence": confidence,
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        # Actualizar detecciones globales
+        with detection_lock:
+            current_detections = detections
+        
+        # Convertir a JPEG para overlay
+        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        
+        with recognition_lock:
+            latest_recognition_frame = jpeg.tobytes()
+        
+        # Contar FPS de reconocimiento
+        recognition_fps_counter += 1
+        current_time = time.time()
+        if current_time - last_recognition_fps_time >= 1.0:
+            current_recognition_fps = recognition_fps_counter
+            recognition_fps_counter = 0
+            last_recognition_fps_time = current_time
+        
+        # Limpiar memoria
+        del np_frame, frame, display_frame, small_frame, rgb_small_frame
+        gc.collect()
+        
+    except Exception as e:
+        print(f"Error en reconocimiento: {e}")
 
 def rpicam_video_reader():
-    """Captura frames JPEG desde rpicam-vid y los distribuye a las colas"""
+    """Captura frames y los distribuye"""
     cmd = [
         "rpicam-vid",
         "-n", "-t", "0",
@@ -280,23 +530,20 @@ def rpicam_video_reader():
         "--framerate", "25"
     ]
     
-    print(f"🎥 Iniciando captura con comando: {' '.join(cmd)}")
+    print(f"🎥 Iniciando captura: {' '.join(cmd)}")
     
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     buffer = b""
     frame_count = 0
-    last_log_time = time.time()
     
     try:
         while True:
             chunk = proc.stdout.read(4096)
             if not chunk:
-                print("❌ No se recibieron datos del proceso rpicam-vid")
                 break
                 
             buffer += chunk
             
-            # Buscar frames JPEG completos
             while True:
                 start = buffer.find(b"\xff\xd8")
                 if start == -1:
@@ -312,64 +559,53 @@ def rpicam_video_reader():
                 buffer = buffer[end+2:]
                 
                 frame_count += 1
-                current_time = time.time()
                 
-                # Log cada 30 frames (aproximadamente cada segundo)
-                if frame_count % 30 == 0:
-                    elapsed = current_time - last_log_time
-                    fps = 30 / elapsed if elapsed > 0 else 0
-                    print(f"📸 Frame {frame_count}: {len(frame_data)} bytes | FPS: {fps:.1f}")
-                    last_log_time = current_time
-                
-                # Cada 4 frames, enviar a reconocimiento facial (para no saturar)
-                if frame_count % 4 == 0:
-                    try:
-                        face_queue.put_nowait(frame_data)
-                    except queue.Full:
-                        pass  # Ignorar si la cola está llena
-                
-                # Todos los frames van a procesamiento rápido
+                # Todos los frames van a video
                 try:
-                    video_queue.put_nowait(frame_data)
-                except queue.Full:
-                    # Si la cola está llena, limpiar frames antiguos
-                    try:
-                        video_queue.get_nowait()
+                    if not video_queue.full():
                         video_queue.put_nowait(frame_data)
+                except:
+                    pass
+                
+                # Solo cada 12 frames van a reconocimiento (2 FPS aprox)
+                if frame_count % 12 == 0:
+                    try:
+                        if not recognition_queue.full():
+                            recognition_queue.put_nowait(frame_data)
                     except:
                         pass
                     
     except Exception as e:
-        print(f"Error en captura de video: {e}")
+        print(f"Error en captura: {e}")
     finally:
-        print("🛑 Terminando captura de video...")
         proc.terminate()
         proc.wait()
 
 def procesar_cola_video():
-    """Procesa frames de la cola de video para streaming"""
-    print("🔄 Iniciando procesamiento de cola de video...")
-    frame_count = 0
-    last_time = time.time()
-    
+    """Procesa cola de video rápido"""
     while True:
         try:
             frame_data = video_queue.get(timeout=0.1)
             procesar_video_rapido(frame_data)
-            frame_count += 1
-            
-            # Control de FPS
-            current_time = time.time()
-            if current_time - last_time >= FRAME_INTERVAL:
-                last_time = current_time
-            else:
-                time.sleep(FRAME_INTERVAL - (current_time - last_time))
-                
+            time.sleep(VIDEO_INTERVAL)
         except queue.Empty:
             time.sleep(0.01)
         except Exception as e:
-            print(f"Error procesando cola de video: {e}")
+            print(f"Error en cola video: {e}")
             time.sleep(0.1)
+
+def procesar_cola_reconocimiento():
+    """Procesa cola de reconocimiento lento"""
+    while True:
+        try:
+            frame_data = recognition_queue.get(timeout=1.0)
+            procesar_reconocimiento_facial(frame_data)
+            time.sleep(RECOGNITION_INTERVAL)
+        except queue.Empty:
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"Error en cola reconocimiento: {e}")
+            time.sleep(0.5)
 
 # ==========================
 # Servidor web
@@ -381,46 +617,63 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 def generate_video():
-    """Genera stream de video MJPEG optimizado"""
+    """Stream de video rápido"""
     global latest_frame
-    frame_count = 0
-    last_frame_time = time.time()
-    
     while True:
-        current_time = time.time()
-        
-        # Control de FPS para el stream
-        if current_time - last_frame_time >= FRAME_INTERVAL:
+        try:
             with lock:
                 if latest_frame is not None:
                     frame = latest_frame
-                    frame_count += 1
-                    last_frame_time = current_time
                 else:
                     time.sleep(0.01)
                     continue
-        else:
-            time.sleep(0.001)  # Sleep muy corto para mantener responsividad
-            continue
-            
-        yield (b"--frame\r\n"
-               b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+        except Exception as e:
+            print(f"Error en stream video: {e}")
+            time.sleep(0.01)
+
+def generate_recognition():
+    """Stream de reconocimiento con overlay"""
+    global latest_recognition_frame
+    while True:
+        try:
+            with recognition_lock:
+                if latest_recognition_frame is not None:
+                    frame = latest_recognition_frame
+                else:
+                    time.sleep(0.1)
+                    continue
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+        except Exception as e:
+            print(f"Error en stream reconocimiento: {e}")
+            time.sleep(0.1)
 
 @app.route("/video_feed")
 def video_feed():
     return Response(generate_video(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
+@app.route("/recognition_feed")
+def recognition_feed():
+    return Response(generate_recognition(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
 @app.route("/register_face", methods=["POST"])
 def register_face():
-    """Recibe nombre + imagen para registrar rostro"""
+    """Registra un nuevo rostro"""
     data = request.json
     name = data.get("name")
     image_b64 = data.get("image")
+    
     if not name or not image_b64:
         return jsonify({"success": False, "message": "Faltan datos"}), 400
 
     try:
-        # Convertir base64 a numpy array
+        # Verificar si ya existe
+        if check_person_exists(name):
+            return jsonify({"success": False, "message": f"La persona '{name}' ya está registrada"}), 400
+        
+        # Procesar imagen
         header, encoded = image_b64.split(",", 1)
         img_data = base64.b64decode(encoded)
         np_img = np.frombuffer(img_data, dtype=np.uint8)
@@ -436,105 +689,118 @@ def register_face():
             return jsonify({"success": False, "message": "No se detectó rostro en la imagen"}), 400
             
         encoding = face_recognition.face_encodings(rgb_frame, face_locations)[0]
-        save_face(name, encoding)
         
-        # Actualizar cache
-        global known_faces_cache, last_face_update
-        known_faces_cache = load_faces()
-        last_face_update = time.time()
-        
-        return jsonify({"success": True, "message": f"Rostro de '{name}' registrado exitosamente!"})
+        if save_face(name, encoding):
+            # Actualizar cache
+            global known_faces_cache
+            known_faces_cache = load_faces()
+            
+            return jsonify({"success": True, "message": f"Persona '{name}' registrada exitosamente!"})
+        else:
+            return jsonify({"success": False, "message": f"Error al guardar en base de datos"}), 500
         
     except Exception as e:
-        return jsonify({"success": False, "message": f"Error al registrar rostro: {str(e)}"}), 500
+        print(f"Error registrando rostro: {e}")
+        return jsonify({"success": False, "message": f"Error interno: {str(e)}"}), 500
+
+@app.route("/check_person", methods=["POST"])
+def check_person():
+    """Verifica si una persona existe"""
+    data = request.json
+    name = data.get("name")
+    
+    if not name:
+        return jsonify({"exists": False}), 400
+    
+    exists = check_person_exists(name)
+    return jsonify({"exists": exists, "name": name})
+
+@app.route("/recent_detections")
+def recent_detections():
+    """Obtiene detecciones recientes"""
+    detections = get_recent_detections(5)
+    return jsonify({"detections": detections})
 
 @app.route("/status")
 def status():
     return jsonify({
         "cpu_usage": cpu_usage,
         "ram_usage": ram_usage,
-        "cpu_temp": cpu_temp
+        "cpu_temp": cpu_temp,
+        "video_fps": current_video_fps,
+        "recognition_fps": current_recognition_fps
     })
 
 def actualizar_metricas():
     global cpu_usage, ram_usage, cpu_temp
     while True:
         try:
-            cpu_usage = psutil.cpu_percent(interval=None)
+            cpu_usage = psutil.cpu_percent(interval=1)
             ram_usage = psutil.virtual_memory().percent
             if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
                 with open("/sys/class/thermal/thermal_zone0/temp","r") as f:
                     cpu_temp = float(f.read().strip())/1000.0
             time.sleep(2)
         except Exception as e:
-            print(f"Error actualizando métricas: {e}")
+            print(f"Error métricas: {e}")
             time.sleep(2)
 
 # ==========================
 # Main
 # ==========================
 def main():
-    print("🚀 Iniciando sistema de reconocimiento facial optimizado...")
+    print("🚀 Iniciando sistema de chequeo facial ULTRA OPTIMIZADO...")
     
     # Inicializar base de datos
     init_db()
     print("✅ Base de datos inicializada")
     
-    # Cargar rostros conocidos inicialmente
-    global known_faces_cache, last_face_update
+    # Cargar rostros conocidos
+    global known_faces_cache
     known_faces_cache = load_faces()
-    last_face_update = time.time()
-    print(f"✅ {len(known_faces_cache)} rostros cargados de la base de datos")
+    print(f"✅ {len(known_faces_cache)} personas cargadas")
     
-    # Iniciar hilos
-    print("🔄 Iniciando hilos de procesamiento...")
+    print("🔄 Iniciando hilos optimizados...")
     
     # Hilo para captura de video
     video_thread = threading.Thread(target=rpicam_video_reader, daemon=True, name="VideoCapture")
     video_thread.start()
-    print("✅ Hilo de captura de video iniciado")
+    print("✅ Captura de video iniciada")
     
-    # Esperar un momento para que la cámara se inicialice
     time.sleep(2)
     
     # Hilo para procesamiento rápido de video
-    process_thread = threading.Thread(target=procesar_cola_video, daemon=True, name="VideoProcess")
-    process_thread.start()
-    print("✅ Hilo de procesamiento de video iniciado")
+    process_video_thread = threading.Thread(target=procesar_cola_video, daemon=True, name="VideoProcess")
+    process_video_thread.start()
+    print("✅ Procesamiento de video rápido iniciado")
     
-    # Hilo para reconocimiento facial
-    face_thread = threading.Thread(target=procesar_reconocimiento_facial, daemon=True, name="FaceRecognition")
-    face_thread.start()
-    print("✅ Hilo de reconocimiento facial iniciado")
+    # Hilo para reconocimiento facial lento
+    recognition_thread = threading.Thread(target=procesar_cola_reconocimiento, daemon=True, name="Recognition")
+    recognition_thread.start()
+    print("✅ Reconocimiento facial lento iniciado")
     
-    # Hilo para métricas del sistema
+    # Hilo para métricas
     metrics_thread = threading.Thread(target=actualizar_metricas, daemon=True, name="Metrics")
     metrics_thread.start()
-    print("✅ Hilo de métricas iniciado")
+    print("✅ Métricas iniciadas")
     
-    # Hilo para servidor web
+    # Servidor web
     web_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, threaded=True), daemon=True, name="WebServer")
     web_thread.start()
     print("✅ Servidor web iniciado")
     
-    print("\n🎉 Sistema completamente iniciado!")
+    print("\n🎉 Sistema OPTIMIZADO completamente iniciado!")
     print("🌐 Accede a: http://<raspberry_pi_ip>:5000")
-    print("📱 El video debería mostrarse en tiempo real ahora")
+    print("📱 Video fluido (25 FPS) + Reconocimiento (2 FPS)")
+    print("💡 CPU optimizado para máximo 80% de uso")
     print("⏹️  Presiona Ctrl+C para detener")
     
     try:
         while True:
-            time.sleep(1)
-            # Verificar que los hilos principales estén vivos
-            if not video_thread.is_alive():
-                print("❌ Hilo de captura de video se detuvo")
-                break
-            if not process_thread.is_alive():
-                print("❌ Hilo de procesamiento de video se detuvo")
-                break
+            time.sleep(5)
+            print(f"📊 Estado: Video {current_video_fps} FPS | Reconocimiento {current_recognition_fps} FPS | CPU {cpu_usage:.1f}%")
     except KeyboardInterrupt:
-        print("\n🛑 Interrumpido por el usuario.")
-        print("🔄 Cerrando sistema...")
+        print("\n🛑 Sistema detenido")
 
 if __name__ == "__main__":
     main()
