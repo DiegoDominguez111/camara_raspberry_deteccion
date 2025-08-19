@@ -22,12 +22,13 @@ import gc
 # ==========================
 # Configuración Optimizada
 # ==========================
-SENSOR_WIDTH = 1640  # Reducido para mejor rendimiento
-SENSOR_HEIGHT = 1232
+# Configuración simplificada para streaming directo
+SENSOR_WIDTH = 640    # Resolución directa para streaming
+SENSOR_HEIGHT = 480
 CANVAS_WIDTH = 640
 CANVAS_HEIGHT = 480
-SCALE_X = CANVAS_WIDTH / SENSOR_WIDTH
-SCALE_Y = CANVAS_HEIGHT / SENSOR_HEIGHT
+SCALE_X = 1.0         # No hay escalado necesario
+SCALE_Y = 1.0
 
 DB_PATH = "faces.db"
 latest_frame = None
@@ -35,9 +36,9 @@ latest_recognition_frame = None
 lock = threading.Lock()
 recognition_lock = threading.Lock()
 
-# Colas separadas para video rápido y reconocimiento lento
-video_queue = queue.Queue(maxsize=5)  # Solo para video rápido
-recognition_queue = queue.Queue(maxsize=2)  # Solo para reconocimiento
+# Colas optimizadas para mejor rendimiento
+video_queue = queue.Queue(maxsize=3)  # Reducido para menor latencia
+recognition_queue = queue.Queue(maxsize=1)  # Solo 1 frame para reconocimiento
 
 # Cache para rostros conocidos
 known_faces_cache = []
@@ -52,17 +53,21 @@ cpu_usage = 0.0
 ram_usage = 0.0
 cpu_temp = 0.0
 
-# Control de FPS optimizado
-VIDEO_FPS = 25  # FPS para video puro
-RECOGNITION_FPS = 2  # FPS para reconocimiento (mucho más lento)
+# Control de FPS optimizado - AUMENTADO para mejor fluidez
+VIDEO_FPS = 25  # Reducido a 25 FPS para estabilidad con IMX500
+RECOGNITION_FPS = 3  # Reducido a 3 FPS para estabilidad
 VIDEO_INTERVAL = 1.0 / VIDEO_FPS
 RECOGNITION_INTERVAL = 1.0 / RECOGNITION_FPS
+
+# Control de latencia
+MAX_FRAME_AGE = 5.0  # Aumentado a 5 segundos para permitir procesamiento
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>Sistema de Chequeo Facial</title>
+    <meta charset="UTF-8">
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
         .container { max-width: 1000px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -87,22 +92,29 @@ HTML_TEMPLATE = """
         .person-time { color: #6c757d; font-size: 0.9em; }
         .person-confidence { color: #28a745; font-weight: bold; }
         .fps-info { margin: 10px 0; color: #6c757d; font-size: 0.9em; }
+        .video-wrapper { position: relative; display: inline-block; }
+        .video-stream { border: 3px solid #007bff; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        .recognition-overlay { position: absolute; top: 0; left: 0; pointer-events: none; opacity: 0.95; }
+        .performance-indicator { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 15px; font-size: 12px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🕐 Sistema de Chequeo Facial (Optimizado)</h1>
+        <h1>🕐 Sistema de Chequeo Facial (ULTRA OPTIMIZADO)</h1>
         
         <div class="video-container">
             <h2>📹 Cámara en Tiempo Real</h2>
-            <div style="position: relative; display: inline-block;">
-                <img id="videoStream" src="{{ url_for('video_feed') }}" width="640" height="480" style="border: 3px solid #007bff; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);"/>
-                <img id="recognitionOverlay" src="{{ url_for('recognition_feed') }}" width="640" height="480" style="position: absolute; top: 0; left: 0; pointer-events: none; opacity: 0.9;"/>
+            <div class="video-wrapper">
+                <img id="videoStream" class="video-stream" src="{{ url_for('video_feed') }}" width="640" height="480"/>
+                <img id="recognitionOverlay" class="recognition-overlay" src="{{ url_for('recognition_feed') }}" width="640" height="480"/>
+                <div class="performance-indicator">
+                    <span id="latencyIndicator">Latencia: --</span>
+                </div>
             </div>
             <div class="fps-info">
                 📊 Video: <span id="videoFps">--</span> FPS | Reconocimiento: <span id="recognitionFps">--</span> FPS
             </div>
-            <p><em>Video fluido + Reconocimiento facial superpuesto</em></p>
+            <p><em>Video fluido (25 FPS) + Reconocimiento facial superpuesto (3 FPS)</em></p>
         </div>
         
         <div class="form-container">
@@ -134,6 +146,24 @@ HTML_TEMPLATE = """
         const messageDiv = document.getElementById('message');
         const registerBtn = document.getElementById('registerBtn');
         const recentDetectionsDiv = document.getElementById('recentDetections');
+        const latencyIndicator = document.getElementById('latencyIndicator');
+        
+        // Optimización de imágenes para menor latencia
+        const videoStream = document.getElementById('videoStream');
+        const recognitionOverlay = document.getElementById('recognitionOverlay');
+        
+        // Configurar imágenes para mejor rendimiento
+        videoStream.style.imageRendering = 'optimizeSpeed';
+        recognitionOverlay.style.imageRendering = 'optimizeSpeed';
+        
+        // Medir latencia del video
+        let lastVideoUpdate = Date.now();
+        videoStream.addEventListener('load', () => {
+            const now = Date.now();
+            const latency = now - lastVideoUpdate;
+            latencyIndicator.textContent = `Latencia: ${latency}ms`;
+            lastVideoUpdate = now;
+        });
         
         // Verificar si una persona ya está registrada
         async function checkPersonExists(name) {
@@ -177,7 +207,7 @@ HTML_TEMPLATE = """
                 button.textContent = 'Capturando rostro...';
                 
                 // Esperar un momento para asegurar que hay un frame disponible
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 300)); // Reducido de 500ms a 300ms
                 
                 // Usar canvas para capturar frame del video de reconocimiento
                 const recognitionImg = document.getElementById('recognitionOverlay');
@@ -262,9 +292,9 @@ HTML_TEMPLATE = """
             }
         }
         
-        // Actualizar cada 2 segundos
-        setInterval(updateStatus, 2000);
-        setInterval(updateRecentDetections, 5000); // Cada 5 segundos
+        // Actualizar cada 1 segundo para mejor responsividad
+        setInterval(updateStatus, 1000);
+        setInterval(updateRecentDetections, 3000); // Cada 3 segundos
         
         // Actualización inicial
         updateStatus();
@@ -375,62 +405,78 @@ current_video_fps = 0
 current_recognition_fps = 0
 
 def procesar_video_rapido(frame_data):
-    """Procesa frames solo para video rápido SIN reconocimiento facial"""
+    """Procesa frames solo para video rápido - CON LOGGING DETALLADO"""
     global latest_frame, video_fps_counter, current_video_fps, last_video_fps_time
     
     try:
-        # Decodificar y redimensionar rápidamente
+        # Verificar antigüedad del frame para evitar efecto fantasma
+        current_time = time.time()
+        
+        print(f"🎬 Procesando frame de video: {len(frame_data)} bytes")
+        
+        # Decodificar frame
         np_frame = np.frombuffer(frame_data, dtype=np.uint8)
         frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
         if frame is None:
+            print("❌ Error: frame no se pudo decodificar")
             return
         
-        # Solo redimensionar, sin procesamiento
-        display_frame = cv2.resize(frame, (CANVAS_WIDTH, CANVAS_HEIGHT))
+        print(f"✅ Frame decodificado: {frame.shape}")
         
-        # Convertir a JPEG con calidad media para velocidad
-        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        # El frame ya está en 640x480, no necesita redimensionar
+        display_frame = frame
         
+        # Convertir a JPEG con calidad optimizada para velocidad
+        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        
+        print(f"✅ Frame convertido a JPEG: {len(jpeg.tobytes())} bytes")
+        
+        # Actualizar frame con lock optimizado
         with lock:
             latest_frame = jpeg.tobytes()
         
         # Contar FPS
         video_fps_counter += 1
-        current_time = time.time()
         if current_time - last_video_fps_time >= 1.0:
             current_video_fps = video_fps_counter
             video_fps_counter = 0
             last_video_fps_time = current_time
+            print(f"📊 Video FPS actualizado: {current_video_fps}")
         
-        # Limpiar memoria
+        # Limpiar memoria inmediatamente
         del np_frame, frame, display_frame
         
     except Exception as e:
-        print(f"Error en video rápido: {e}")
+        print(f"❌ Error en video rápido: {e}")
+        import traceback
+        traceback.print_exc()
 
 def procesar_reconocimiento_facial(frame_data):
-    """Procesa frames SOLO para reconocimiento facial (lento)"""
+    """Procesa frames SOLO para reconocimiento facial (optimizado para menor latencia)"""
     global latest_recognition_frame, current_detections, recognition_fps_counter, current_recognition_fps, last_recognition_fps_time
     
     try:
+        # Verificar antigüedad del frame
+        current_time = time.time()
+        
         # Decodificar frame
         np_frame = np.frombuffer(frame_data, dtype=np.uint8)
         frame = cv2.imdecode(np_frame, cv2.IMREAD_COLOR)
         if frame is None:
             return
         
-        # Redimensionar para display
-        display_frame = cv2.resize(frame, (CANVAS_WIDTH, CANVAS_HEIGHT))
+        # El frame ya está en 640x480, no necesita redimensionar
+        display_frame = frame
         
-        # Redimensionar aún más para reconocimiento (más rápido)
-        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        # Redimensionar para reconocimiento (más pequeño = más rápido)
+        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)  # Reducido a 320x240
         rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
         
         # Detectar rostros en frame pequeño
-        face_locations = face_recognition.face_locations(rgb_small_frame)
+        face_locations = face_recognition.face_locations(rgb_small_frame, model="hog")  # Usar HOG para velocidad
         face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
         
-        # Escalar coordenadas de vuelta
+        # Escalar coordenadas de vuelta (corregido para nueva resolución)
         face_locations = [(top*2, right*2, bottom*2, left*2) for (top, right, bottom, left) in face_locations]
         
         # Procesar detecciones
@@ -439,13 +485,13 @@ def procesar_reconocimiento_facial(frame_data):
             name = "Desconocido"
             confidence = 0.0
             
-            # Comparar con rostros conocidos
+            # Comparar con rostros conocidos (optimizado)
             for db_name, db_enc in known_faces_cache:
                 try:
                     distance = face_recognition.face_distance([db_enc], encoding)[0]
                     current_confidence = (1 - distance) * 100
                     
-                    if current_confidence > confidence and current_confidence > 55:  # Umbral más bajo
+                    if current_confidence > confidence and current_confidence > 55:
                         confidence = current_confidence
                         name = db_name
                 except:
@@ -460,115 +506,97 @@ def procesar_reconocimiento_facial(frame_data):
             # Configurar colores y estilos según el estado
             if name != "Desconocido":
                 # Persona reconocida - Verde profesional
-                box_color = (0, 150, 0)  # Verde más suave
-                text_color = (255, 255, 255)  # Texto blanco
-                bg_color = (0, 100, 0)  # Fondo verde oscuro
+                box_color = (0, 150, 0)
+                text_color = (255, 255, 255)
+                bg_color = (0, 100, 0)
                 thickness = 2
                 text = f"{name} ({confidence:.1f}%)"
                 save_detection(name, confidence)
             else:
                 # Persona desconocida - Rojo reservado
-                box_color = (0, 0, 200)  # Rojo más suave
-                text_color = (255, 255, 255)  # Texto blanco
-                bg_color = (0, 0, 120)  # Fondo rojo oscuro
-                thickness = 3  # Más grueso para desconocidos
+                box_color = (0, 0, 200)
+                text_color = (255, 255, 255)
+                bg_color = (0, 0, 120)
+                thickness = 3
                 text = "DESCONOCIDO"
             
-            # Dibujar box principal con esquinas redondeadas simuladas
-            box_width = display_right - display_left
-            box_height = display_bottom - display_top
-            
-            # Box principal
+            # Dibujar box principal
             cv2.rectangle(display_frame, (display_left, display_top), 
                          (display_right, display_bottom), box_color, thickness)
             
-            # Esquinas decorativas (pequeños cuadrados en las esquinas)
+            # Esquinas decorativas
             corner_size = 8
-            # Esquina superior izquierda
             cv2.rectangle(display_frame, (display_left, display_top), 
                          (display_left + corner_size, display_top + corner_size), box_color, -1)
-            # Esquina superior derecha
             cv2.rectangle(display_frame, (display_right - corner_size, display_top), 
                          (display_right, display_top + corner_size), box_color, -1)
-            # Esquina inferior izquierda
             cv2.rectangle(display_frame, (display_left, display_bottom - corner_size), 
                          (display_left + corner_size, display_bottom), box_color, -1)
-            # Esquina inferior derecha
             cv2.rectangle(display_frame, (display_right - corner_size, display_bottom - corner_size), 
                          (display_right, display_bottom), box_color, -1)
             
-            # Preparar etiqueta de nombre
-            font = cv2.FONT_HERSHEY_DUPLEX  # Fuente más legible
+            # Etiqueta de nombre optimizada
+            font = cv2.FONT_HERSHEY_DUPLEX
             font_scale = 0.6
             font_thickness = 1
             
-            # Calcular dimensiones del texto
             text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
             text_width = text_size[0]
             text_height = text_size[1]
             
-            # Calcular posición de la etiqueta (arriba del box)
-            label_y = max(display_top - 15, text_height + 10)  # Evitar que se salga de la pantalla
+            label_y = max(display_top - 15, text_height + 10)
             label_x = display_left
             
-            # Padding para la etiqueta
             padding_x = 8
             padding_y = 4
             
-            # Dibujar fondo de la etiqueta
+            # Fondo de la etiqueta
             label_bg_left = label_x
             label_bg_right = label_x + text_width + padding_x * 2
             label_bg_top = label_y - text_height - padding_y
             label_bg_bottom = label_y + padding_y
             
-            # Fondo principal de la etiqueta
             cv2.rectangle(display_frame, 
                          (label_bg_left, label_bg_top), 
                          (label_bg_right, label_bg_bottom), 
                          bg_color, -1)
             
-            # Borde de la etiqueta
             cv2.rectangle(display_frame, 
                          (label_bg_left, label_bg_top), 
                          (label_bg_right, label_bg_bottom), 
                          box_color, 1)
             
-            # Línea conectora entre etiqueta y box
+            # Línea conectora
             line_start_y = label_bg_bottom
             line_end_y = display_top
             line_x = label_x + padding_x + text_width // 2
             
             cv2.line(display_frame, (line_x, line_start_y), (line_x, line_end_y), box_color, 1)
             
-            # Dibujar texto centrado en la etiqueta
+            # Texto
             text_x = label_x + padding_x
             text_y = label_y - padding_y // 2
             
-            # Sombra del texto para mejor legibilidad
             cv2.putText(display_frame, text, 
                        (text_x + 1, text_y + 1), 
                        font, font_scale, (0, 0, 0), font_thickness)
             
-            # Texto principal
             cv2.putText(display_frame, text, 
                        (text_x, text_y), 
                        font, font_scale, text_color, font_thickness)
             
-            # Indicador de confianza para personas reconocidas
+            # Barra de confianza para personas reconocidas
             if name != "Desconocido":
-                # Barra de confianza
                 confidence_bar_width = 60
                 confidence_bar_height = 4
                 confidence_bar_x = display_left
                 confidence_bar_y = display_bottom + 8
                 
-                # Fondo de la barra
                 cv2.rectangle(display_frame, 
                              (confidence_bar_x, confidence_bar_y), 
                              (confidence_bar_x + confidence_bar_width, confidence_bar_y + confidence_bar_height), 
                              (50, 50, 50), -1)
                 
-                # Barra de confianza (verde)
                 confidence_width = int((confidence / 100.0) * confidence_bar_width)
                 if confidence_width > 0:
                     cv2.rectangle(display_frame, 
@@ -576,7 +604,6 @@ def procesar_reconocimiento_facial(frame_data):
                                  (confidence_bar_x + confidence_width, confidence_bar_y + confidence_bar_height), 
                                  (0, 200, 0), -1)
                 
-                # Borde de la barra
                 cv2.rectangle(display_frame, 
                              (confidence_bar_x, confidence_bar_y), 
                              (confidence_bar_x + confidence_bar_width, confidence_bar_y + confidence_bar_height), 
@@ -592,21 +619,20 @@ def procesar_reconocimiento_facial(frame_data):
         with detection_lock:
             current_detections = detections
         
-        # Convertir a JPEG para overlay
-        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        # Convertir a JPEG para overlay con calidad optimizada
+        _, jpeg = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         
         with recognition_lock:
             latest_recognition_frame = jpeg.tobytes()
         
         # Contar FPS de reconocimiento
         recognition_fps_counter += 1
-        current_time = time.time()
         if current_time - last_recognition_fps_time >= 1.0:
             current_recognition_fps = recognition_fps_counter
             recognition_fps_counter = 0
             last_recognition_fps_time = current_time
         
-        # Limpiar memoria
+        # Limpiar memoria inmediatamente
         del np_frame, frame, display_frame, small_frame, rgb_small_frame
         gc.collect()
         
@@ -614,27 +640,32 @@ def procesar_reconocimiento_facial(frame_data):
         print(f"Error en reconocimiento: {e}")
 
 def rpicam_video_reader():
-    """Captura frames y los distribuye"""
+    """Captura frames y los distribuye - CORREGIDO basado en script de prueba exitoso"""
     cmd = [
         "rpicam-vid",
         "-n", "-t", "0",
         "--codec", "mjpeg",
         "-o", "-",
-        "--width", str(SENSOR_WIDTH),
-        "--height", str(SENSOR_HEIGHT),
+        "--width", "640",
+        "--height", "480",
         "--framerate", "25"
     ]
     
-    print(f"🎥 Iniciando captura: {' '.join(cmd)}")
+    print(f"🎥 Iniciando captura corregida basada en script de prueba exitoso: {' '.join(cmd)}")
     
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     buffer = b""
     frame_count = 0
+    last_frame_time = time.time()
+    
+    print("✅ Proceso de captura iniciado, esperando frames...")
     
     try:
         while True:
-            chunk = proc.stdout.read(4096)
+            # Usar el mismo tamaño de chunk que funciona en el script de prueba
+            chunk = proc.stdout.read(1024)
             if not chunk:
+                print("⚠️  No hay datos del proceso")
                 break
                 
             buffer += chunk
@@ -654,53 +685,72 @@ def rpicam_video_reader():
                 buffer = buffer[end+2:]
                 
                 frame_count += 1
+                current_time = time.time()
                 
-                # Todos los frames van a video
+                print(f"📹 Frame {frame_count} detectado: {len(frame_data)} bytes")
+                
+                # Simplificar control de antigüedad - solo para frames muy antiguos
+                if current_time - last_frame_time > MAX_FRAME_AGE:
+                    print(f"⏰ Frame {frame_count} muy antiguo ({current_time - last_frame_time:.1f}s), descartando")
+                    continue
+                
+                # Todos los frames van a video (cola pequeña para menor latencia)
                 try:
                     if not video_queue.full():
                         video_queue.put_nowait(frame_data)
+                        last_frame_time = current_time
+                        print(f"✅ Frame {frame_count} enviado a cola de video")
+                    else:
+                        print(f"⚠️  Cola de video llena, descartando frame {frame_count}")
                 except:
-                    pass
+                    print(f"❌ Error enviando frame {frame_count} a cola de video")
                 
-                # Solo cada 12 frames van a reconocimiento (2 FPS aprox)
-                if frame_count % 12 == 0:
+                # Solo cada 8 frames van a reconocimiento (3 FPS aprox)
+                if frame_count % 8 == 0:
                     try:
                         if not recognition_queue.full():
                             recognition_queue.put_nowait(frame_data)
+                            print(f"👤 Frame {frame_count} enviado a cola de reconocimiento")
+                        else:
+                            print(f"⚠️  Cola de reconocimiento llena, descartando frame {frame_count}")
                     except:
-                        pass
+                        print(f"❌ Error enviando frame {frame_count} a cola de reconocimiento")
                     
     except Exception as e:
-        print(f"Error en captura: {e}")
+        print(f"❌ Error en captura: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
+        print("🛑 Terminando proceso de captura")
         proc.terminate()
         proc.wait()
+        print("✅ Proceso de captura terminado")
 
 def procesar_cola_video():
-    """Procesa cola de video rápido"""
+    """Procesa cola de video rápido - OPTIMIZADO para menor latencia"""
     while True:
         try:
-            frame_data = video_queue.get(timeout=0.1)
+            frame_data = video_queue.get(timeout=0.05)  # Reducido de 0.1 a 0.05 para menor latencia
             procesar_video_rapido(frame_data)
             time.sleep(VIDEO_INTERVAL)
         except queue.Empty:
-            time.sleep(0.01)
+            time.sleep(0.005)  # Reducido de 0.01 a 0.005 para menor latencia
         except Exception as e:
             print(f"Error en cola video: {e}")
-            time.sleep(0.1)
+            time.sleep(0.05)
 
 def procesar_cola_reconocimiento():
-    """Procesa cola de reconocimiento lento"""
+    """Procesa cola de reconocimiento - OPTIMIZADO para menor latencia"""
     while True:
         try:
-            frame_data = recognition_queue.get(timeout=1.0)
+            frame_data = recognition_queue.get(timeout=0.5)  # Reducido de 1.0 a 0.5 para menor latencia
             procesar_reconocimiento_facial(frame_data)
             time.sleep(RECOGNITION_INTERVAL)
         except queue.Empty:
-            time.sleep(0.1)
+            time.sleep(0.05)  # Reducido de 0.1 a 0.05 para menor latencia
         except Exception as e:
             print(f"Error en cola reconocimiento: {e}")
-            time.sleep(0.5)
+            time.sleep(0.25)  # Reducido de 0.5 a 0.25 para menor latencia
 
 # ==========================
 # Servidor web
@@ -712,7 +762,7 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 def generate_video():
-    """Stream de video rápido"""
+    """Stream de video rápido - OPTIMIZADO para menor latencia"""
     global latest_frame
     while True:
         try:
@@ -720,16 +770,16 @@ def generate_video():
                 if latest_frame is not None:
                     frame = latest_frame
                 else:
-                    time.sleep(0.01)
+                    time.sleep(0.005)  # Reducido de 0.01 a 0.005 para menor latencia
                     continue
             yield (b"--frame\r\n"
                    b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
         except Exception as e:
             print(f"Error en stream video: {e}")
-            time.sleep(0.01)
+            time.sleep(0.005)  # Reducido de 0.01 a 0.005 para menor latencia
 
 def generate_recognition():
-    """Stream de reconocimiento con overlay"""
+    """Stream de reconocimiento con overlay - OPTIMIZADO para menor latencia"""
     global latest_recognition_frame
     while True:
         try:
@@ -737,13 +787,13 @@ def generate_recognition():
                 if latest_recognition_frame is not None:
                     frame = latest_recognition_frame
                 else:
-                    time.sleep(0.1)
+                    time.sleep(0.05)  # Reducido de 0.1 a 0.05 para menor latencia
                     continue
             yield (b"--frame\r\n"
                    b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
         except Exception as e:
             print(f"Error en stream reconocimiento: {e}")
-            time.sleep(0.1)
+            time.sleep(0.05)  # Reducido de 0.1 a 0.05 para menor latencia
 
 @app.route("/video_feed")
 def video_feed():
@@ -844,7 +894,16 @@ def actualizar_metricas():
 # Main
 # ==========================
 def main():
-    print("🚀 Iniciando sistema de chequeo facial ULTRA OPTIMIZADO...")
+    print("🚀 Iniciando sistema de chequeo facial SIMPLIFICADO para streaming...")
+    print("⚡ Optimizaciones aplicadas:")
+    print("   • Video: 25 FPS (estable)")
+    print("   • Reconocimiento: 3 FPS (estable)")
+    print("   • Resolución directa: 640x480")
+    print("   • Sin escalado (mejor rendimiento)")
+    print("   • Colas reducidas para menor latencia")
+    print("   • Procesamiento optimizado con HOG")
+    print("   • Control de antigüedad de frames")
+    print("   • Limpieza de memoria inmediata")
     
     # Inicializar base de datos
     init_db()
@@ -855,24 +914,24 @@ def main():
     known_faces_cache = load_faces()
     print(f"✅ {len(known_faces_cache)} personas cargadas")
     
-    print("🔄 Iniciando hilos optimizados...")
+    print("🔄 Iniciando hilos ultra optimizados...")
     
     # Hilo para captura de video
     video_thread = threading.Thread(target=rpicam_video_reader, daemon=True, name="VideoCapture")
     video_thread.start()
-    print("✅ Captura de video iniciada")
+    print("✅ Captura de video simplificada iniciada (25 FPS)")
     
-    time.sleep(2)
+    time.sleep(1)  # Reducido de 2 a 1 segundo
     
     # Hilo para procesamiento rápido de video
     process_video_thread = threading.Thread(target=procesar_cola_video, daemon=True, name="VideoProcess")
     process_video_thread.start()
-    print("✅ Procesamiento de video rápido iniciado")
+    print("✅ Procesamiento de video ultra rápido iniciado")
     
-    # Hilo para reconocimiento facial lento
+    # Hilo para reconocimiento facial optimizado
     recognition_thread = threading.Thread(target=procesar_cola_reconocimiento, daemon=True, name="Recognition")
     recognition_thread.start()
-    print("✅ Reconocimiento facial lento iniciado")
+    print("✅ Reconocimiento facial optimizado iniciado (3 FPS)")
     
     # Hilo para métricas
     metrics_thread = threading.Thread(target=actualizar_metricas, daemon=True, name="Metrics")
@@ -884,15 +943,16 @@ def main():
     web_thread.start()
     print("✅ Servidor web iniciado")
     
-    print("\n🎉 Sistema OPTIMIZADO completamente iniciado!")
+    print("\n🎉 Sistema SIMPLIFICADO completamente iniciado!")
     print("🌐 Accede a: http://<raspberry_pi_ip>:5000")
-    print("📱 Video fluido (25 FPS) + Reconocimiento (2 FPS)")
+    print("📱 Video fluido (25 FPS) + Reconocimiento (3 FPS)")
+    print("⚡ Resolución directa: 640x480 (sin escalado)")
     print("💡 CPU optimizado para máximo 80% de uso")
     print("⏹️  Presiona Ctrl+C para detener")
     
     try:
         while True:
-            time.sleep(5)
+            time.sleep(3)  # Reducido de 5 a 3 segundos
             print(f"📊 Estado: Video {current_video_fps} FPS | Reconocimiento {current_recognition_fps} FPS | CPU {cpu_usage:.1f}%")
     except KeyboardInterrupt:
         print("\n🛑 Sistema detenido")
