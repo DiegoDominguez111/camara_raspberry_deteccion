@@ -46,7 +46,9 @@ lock = threading.Lock()
 latest_frame = None  # Para video feed
 
 # Configuración de dirección del flujo
-FLOW_DIRECTION_NORMAL = True  # True: L->R = Entrada, R->L = Salida | False: L->R = Salida, R->L = Entrada
+FLOW_DIRECTION_NORMAL = (
+    True  # True: L->R = Entrada, R->L = Salida | False: L->R = Salida, R->L = Entrada
+)
 
 cpu_usage = 0.0
 ram_usage = 0.0
@@ -114,7 +116,7 @@ def procesar_inferencia(line):
     with lock:
         # Obtener el valor actual de la dirección del flujo de manera thread-safe
         current_flow_direction = FLOW_DIRECTION_NORMAL
-        
+
         last_side = tracks[tid]["last_side"]
         if last_side != "?" and last_side != side:
             # Determinar entrada/salida basado en la dirección del flujo
@@ -123,21 +125,37 @@ def procesar_inferencia(line):
                 if last_side == "L" and side == "R":
                     total_in += 1
                     personas_habitacion += 1  # Incrementar personas en habitación
-                    print(f"🟢 ENTRADA detectada (L->R) - Total: {total_in}, En habitación: {personas_habitacion}", file=sys.stderr)
+                    print(
+                        f"🟢 ENTRADA detectada (L->R) - Total: {total_in}, En habitación: {personas_habitacion}",
+                        file=sys.stderr,
+                    )
                 elif last_side == "R" and side == "L":
                     total_out += 1
-                    personas_habitacion = max(0, personas_habitacion - 1)  # Decrementar, mínimo 0
-                    print(f"🔴 SALIDA detectada (R->L) - Total: {total_out}, En habitación: {personas_habitacion}", file=sys.stderr)
+                    personas_habitacion = max(
+                        0, personas_habitacion - 1
+                    )  # Decrementar, mínimo 0
+                    print(
+                        f"🔴 SALIDA detectada (R->L) - Total: {total_out}, En habitación: {personas_habitacion}",
+                        file=sys.stderr,
+                    )
             else:
                 # Dirección invertida: L->R = Salida, R->L = Entrada
                 if last_side == "L" and side == "R":
                     total_out += 1
-                    personas_habitacion = max(0, personas_habitacion - 1)  # Decrementar, mínimo 0
-                    print(f"🔴 SALIDA detectada (L->R) [INVERTIDA] - Total: {total_out}, En habitación: {personas_habitacion}", file=sys.stderr)
+                    personas_habitacion = max(
+                        0, personas_habitacion - 1
+                    )  # Decrementar, mínimo 0
+                    print(
+                        f"🔴 SALIDA detectada (L->R) [INVERTIDA] - Total: {total_out}, En habitación: {personas_habitacion}",
+                        file=sys.stderr,
+                    )
                 elif last_side == "R" and side == "L":
                     total_in += 1
                     personas_habitacion += 1  # Incrementar personas en habitación
-                    print(f"🟢 ENTRADA detectada (R->L) [INVERTIDA] - Total: {total_in}, En habitación: {personas_habitacion}", file=sys.stderr)
+                    print(
+                        f"🟢 ENTRADA detectada (R->L) [INVERTIDA] - Total: {total_in}, En habitación: {personas_habitacion}",
+                        file=sys.stderr,
+                    )
             last_update = time.time()
         tracks[tid]["last_side"] = side
         tracks[tid]["last_seen"] = time.time()
@@ -304,7 +322,7 @@ def rpicam_hello_reader():
 # ==========================
 app = Flask(__name__)
 
-HTML_TEMPLATE="""
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
@@ -813,7 +831,6 @@ videoFeed.onload = () => {
 """
 
 
-
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
@@ -847,10 +864,15 @@ def toggle_flow_direction():
     old_direction = "normal" if FLOW_DIRECTION_NORMAL else "invertida"
     FLOW_DIRECTION_NORMAL = not FLOW_DIRECTION_NORMAL
     new_direction = "normal" if FLOW_DIRECTION_NORMAL else "invertida"
-    
-    print(f"🔄 Dirección del flujo cambiada de '{old_direction}' a '{new_direction}'", file=sys.stderr)
-    print(f"🔄 Valor de FLOW_DIRECTION_NORMAL: {FLOW_DIRECTION_NORMAL}", file=sys.stderr)
-    
+
+    print(
+        f"🔄 Dirección del flujo cambiada de '{old_direction}' a '{new_direction}'",
+        file=sys.stderr,
+    )
+    print(
+        f"🔄 Valor de FLOW_DIRECTION_NORMAL: {FLOW_DIRECTION_NORMAL}", file=sys.stderr
+    )
+
     return jsonify({"success": True, "direction": new_direction})
 
 
@@ -864,7 +886,7 @@ def reset_stats():
         tracks = {}
         next_id = 0
         print("🔄 Estadísticas reiniciadas", file=sys.stderr)
-    
+
     return jsonify({"success": True, "message": "Estadísticas reiniciadas"})
 
 
