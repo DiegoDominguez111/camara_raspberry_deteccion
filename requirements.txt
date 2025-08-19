@@ -24,3 +24,8 @@ psutil==5.9.6
 # click==8.1.7     # Dependencia de Flask
 # itsdangerous==2.1.2  # Dependencia de Flask
 # blinker==1.6.3   # Dependencia de Flask 
+
+#REQUISISITOS SCRIPT DE ENCODINGS
+face_recognition
+numpy
+opencv-python
