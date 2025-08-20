@@ -1,0 +1,36 @@
+{
+  "name": "MobileFaceNet",
+  "version": "1.0",
+  "description": "Configuración para MobileFaceNet en AI Camera IMX500",
+  "model": {
+    "type": "face_recognition",
+    "framework": "onnx",
+    "model_file": "/usr/share/rpi-camera-assets/mobilefacenet.onnx",
+    "input_shape": [1, 3, 112, 112],
+    "output_shape": [1, 192],
+    "mean_values": [127.5, 127.5, 127.5],
+    "scale_values": [0.0078125, 0.0078125, 0.0078125],
+    "input_format": "BGR"
+  },
+  "preprocessing": {
+    "resize": {
+      "width": 112,
+      "height": 112
+    },
+    "normalization": {
+      "type": "mean_scale",
+      "mean": [127.5, 127.5, 127.5],
+      "scale": [0.0078125, 0.0078125, 0.0078125]
+    }
+  },
+  "postprocessing": {
+    "embedding_normalization": true,
+    "similarity_threshold": 0.6,
+    "max_faces": 10
+  },
+  "hardware": {
+    "target": "imx500_npu",
+    "optimization": "int8",
+    "batch_size": 1
+  }
+} 
