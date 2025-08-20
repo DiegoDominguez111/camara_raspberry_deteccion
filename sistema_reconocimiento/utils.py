@@ -1,10 +1,16 @@
 import cv2
 import numpy as np
 import base64
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import json
 import time
 from datetime import datetime
+import psutil
+import subprocess
+import logging
+import os
+
+logger = logging.getLogger(__name__)
 
 def draw_face_boxes(frame: np.ndarray, recognitions: List[Tuple[str, float, bool, Tuple[int, int, int, int]]]) -> np.ndarray:
     """
@@ -201,25 +207,219 @@ def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
         return embedding / norm
     return embedding
 
-def get_system_info() -> dict:
+def get_system_metrics() -> dict:
     """
-    Obtiene información del sistema
+    Obtiene métricas del sistema: CPU, RAM, temperatura
     
     Returns:
-        Diccionario con información del sistema
+        Diccionario con métricas del sistema
     """
     try:
-        import psutil
-        return {
-            'cpu_percent': psutil.cpu_percent(interval=1),
-            'memory_percent': psutil.virtual_memory().percent,
-            'disk_percent': psutil.disk_usage('/').percent
-        }
-    except ImportError:
+        metrics = {}
+        
+        # CPU
+        try:
+            metrics['cpu_percent'] = psutil.cpu_percent(interval=1)
+            metrics['cpu_count'] = psutil.cpu_count()
+            metrics['cpu_freq'] = psutil.cpu_freq()._asdict() if psutil.cpu_freq() else None
+        except Exception as e:
+            logger.warning(f"No se pudo obtener métricas de CPU: {e}")
+            metrics['cpu_percent'] = 0
+            metrics['cpu_count'] = 0
+            metrics['cpu_freq'] = None
+        
+        # Memoria
+        try:
+            memory = psutil.virtual_memory()
+            metrics['memory_percent'] = memory.percent
+            metrics['memory_used'] = memory.used
+            metrics['memory_total'] = memory.total
+            metrics['memory_available'] = memory.available
+        except Exception as e:
+            logger.warning(f"No se pudo obtener métricas de memoria: {e}")
+            metrics['memory_percent'] = 0
+            metrics['memory_used'] = 0
+            metrics['memory_total'] = 0
+            metrics['memory_available'] = 0
+        
+        # Disco
+        try:
+            disk = psutil.disk_usage('/')
+            metrics['disk_percent'] = disk.percent
+            metrics['disk_used'] = disk.used
+            metrics['disk_total'] = disk.total
+            metrics['disk_free'] = disk.free
+        except Exception as e:
+            logger.warning(f"No se pudo obtener métricas de disco: {e}")
+            metrics['disk_percent'] = 0
+            metrics['disk_used'] = 0
+            metrics['disk_total'] = 0
+            metrics['disk_free'] = 0
+        
+        # Temperatura
+        try:
+            temp = get_raspberry_pi_temperature()
+            metrics['temperature'] = temp
+        except Exception as e:
+            logger.warning(f"No se pudo obtener temperatura: {e}")
+            metrics['temperature'] = None
+        
+        # Uptime del sistema
+        try:
+            metrics['uptime'] = time.time() - psutil.boot_time()
+        except Exception as e:
+            logger.warning(f"No se pudo obtener uptime: {e}")
+            metrics['uptime'] = 0
+        
+        return metrics
+        
+    except Exception as e:
+        logger.error(f"Error al obtener métricas del sistema: {e}")
         return {
             'cpu_percent': 0,
             'memory_percent': 0,
-            'disk_percent': 0
+            'disk_percent': 0,
+            'temperature': None,
+            'uptime': 0
+        }
+
+def get_raspberry_pi_temperature() -> Optional[float]:
+    """
+    Obtiene la temperatura de la Raspberry Pi
+    
+    Returns:
+        Temperatura en grados Celsius o None si no se puede obtener
+    """
+    try:
+        # Intentar obtener temperatura usando vcgencmd
+        result = subprocess.run(['vcgencmd', 'measure_temp'], 
+                              capture_output=True, text=True, timeout=5)
+        
+        if result.returncode == 0:
+            # El formato es "temp=XX.X'C"
+            temp_str = result.stdout.strip()
+            temp_value = float(temp_str.split('=')[1].split("'")[0])
+            return temp_value
+        else:
+            logger.warning(f"vcgencmd falló: {result.stderr}")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        logger.warning("Timeout al obtener temperatura")
+        return None
+    except Exception as e:
+        logger.warning(f"Error al obtener temperatura: {e}")
+        return None
+
+def get_camera_metrics() -> dict:
+    """
+    Intenta obtener métricas de la cámara IMX500
+    
+    Returns:
+        Diccionario con métricas de la cámara o información de error
+    """
+    try:
+        metrics = {}
+        
+        # Verificar estado de la cámara
+        try:
+            result = subprocess.run(['rpicam-hello', '--list-cameras'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                if 'imx500' in result.stdout:
+                    metrics['camera_available'] = True
+                    metrics['camera_type'] = 'IMX500'
+                    
+                    # Intentar obtener información de la cámara
+                    try:
+                        info_result = subprocess.run(['rpicam-hello', '--camera', '0', '--timeout', '1s'], 
+                                                   capture_output=True, text=True, timeout=3)
+                        
+                        if info_result.returncode == 0:
+                            # Extraer información del output
+                            output_lines = info_result.stdout.split('\n')
+                            
+                            # Buscar información de FPS
+                            for line in output_lines:
+                                if 'fps' in line.lower():
+                                    metrics['camera_fps'] = line.strip()
+                                    break
+                            
+                            # Buscar información de resolución
+                            for line in output_lines:
+                                if 'x' in line and ('width' in line.lower() or 'height' in line.lower()):
+                                    metrics['camera_resolution'] = line.strip()
+                                    break
+                        else:
+                            metrics['camera_info'] = "No se pudo obtener información detallada"
+                            
+                    except Exception as e:
+                        logger.warning(f"No se pudo obtener información detallada de la cámara: {e}")
+                        metrics['camera_info'] = f"Error: {str(e)}"
+                else:
+                    metrics['camera_available'] = False
+                    metrics['camera_type'] = 'None'
+            else:
+                metrics['camera_available'] = False
+                metrics['camera_error'] = result.stderr
+                
+        except subprocess.TimeoutExpired:
+            metrics['camera_available'] = False
+            metrics['camera_error'] = 'Timeout al verificar cámara'
+        except Exception as e:
+            metrics['camera_available'] = False
+            metrics['camera_error'] = str(e)
+        
+        # Verificar modelos disponibles
+        try:
+            models_dir = '/usr/share/imx500-models'
+            if os.path.exists(models_dir):
+                models = os.listdir(models_dir)
+                metrics['available_models'] = [m for m in models if m.endswith('.rpk')]
+                metrics['models_count'] = len(metrics['available_models'])
+            else:
+                metrics['available_models'] = []
+                metrics['models_count'] = 0
+        except Exception as e:
+            logger.warning(f"No se pudo obtener información de modelos: {e}")
+            metrics['available_models'] = []
+            metrics['models_count'] = 0
+        
+        return metrics
+        
+    except Exception as e:
+        logger.error(f"Error al obtener métricas de la cámara: {e}")
+        return {
+            'camera_available': False,
+            'camera_error': str(e),
+            'available_models': [],
+            'models_count': 0
+        }
+
+def get_all_metrics() -> dict:
+    """
+    Obtiene todas las métricas del sistema y la cámara
+    
+    Returns:
+        Diccionario con todas las métricas
+    """
+    try:
+        all_metrics = {
+            'timestamp': datetime.now().isoformat(),
+            'system': get_system_metrics(),
+            'camera': get_camera_metrics()
+        }
+        
+        return all_metrics
+        
+    except Exception as e:
+        logger.error(f"Error al obtener todas las métricas: {e}")
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'error': str(e),
+            'system': {},
+            'camera': {}
         }
 
 def create_test_image(width: int = 640, height: int = 480) -> np.ndarray:
@@ -247,4 +447,41 @@ def create_test_image(width: int = 640, height: int = 480) -> np.ndarray:
     cv2.putText(image, "Imagen de Prueba", (50, height//2),
                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     
-    return image 
+    return image
+
+def log_system_event(event_type: str, message: str, details: dict = None):
+    """
+    Registra un evento del sistema
+    
+    Args:
+        event_type: Tipo de evento (ERROR, WARNING, INFO, SUCCESS)
+        message: Mensaje del evento
+        details: Detalles adicionales del evento
+    """
+    try:
+        event = {
+            'timestamp': datetime.now().isoformat(),
+            'type': event_type,
+            'message': message,
+            'details': details or {}
+        }
+        
+        # Guardar en archivo de log
+        log_file = 'tmp/system_events.log'
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        
+        with open(log_file, 'a') as f:
+            f.write(json.dumps(event) + '\n')
+        
+        # También loggear a consola
+        if event_type == 'ERROR':
+            logger.error(message)
+        elif event_type == 'WARNING':
+            logger.warning(message)
+        elif event_type == 'SUCCESS':
+            logger.info(message)
+        else:
+            logger.info(message)
+            
+    except Exception as e:
+        logger.error(f"Error al registrar evento del sistema: {e}") 

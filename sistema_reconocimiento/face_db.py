@@ -20,7 +20,7 @@ class FaceDatabase:
             CREATE TABLE IF NOT EXISTS personas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT NOT NULL UNIQUE,
-                embedding TEXT NOT NULL,
+                embedding BLOB NOT NULL,
                 fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -32,6 +32,7 @@ class FaceDatabase:
                 persona_id INTEGER,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 confianza REAL NOT NULL,
+                raw_payload TEXT,
                 FOREIGN KEY (persona_id) REFERENCES personas (id)
             )
         ''')
@@ -42,15 +43,15 @@ class FaceDatabase:
     def add_person(self, nombre: str, embedding: np.ndarray) -> bool:
         """Registra una nueva persona con su embedding facial"""
         try:
-            # Convertir embedding a string JSON
-            embedding_str = json.dumps(embedding.tolist())
+            # Convertir embedding a BLOB (bytes)
+            embedding_bytes = embedding.tobytes()
             
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute(
                 "INSERT INTO personas (nombre, embedding) VALUES (?, ?)",
-                (nombre, embedding_str)
+                (nombre, embedding_bytes)
             )
             
             conn.commit()
@@ -79,8 +80,9 @@ class FaceDatabase:
             best_match = None
             best_score = 0
             
-            for nombre, embedding_str in results:
-                stored_embedding = np.array(json.loads(embedding_str))
+            for nombre, embedding_bytes in results:
+                # Convertir BLOB de vuelta a numpy array
+                stored_embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
                 
                 # Calcular similitud coseno
                 similarity = self._cosine_similarity(embedding, stored_embedding)
@@ -123,15 +125,15 @@ class FaceDatabase:
             print(f"Error al listar personas: {e}")
             return []
     
-    def save_log(self, persona_id: Optional[int], confianza: float) -> bool:
+    def save_log(self, persona_id: Optional[int], confianza: float, raw_payload: str = None) -> bool:
         """Guarda un log de reconocimiento"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute(
-                "INSERT INTO logs (persona_id, confianza) VALUES (?, ?)",
-                (persona_id, confianza)
+                "INSERT INTO logs (persona_id, confianza, raw_payload) VALUES (?, ?, ?)",
+                (persona_id, confianza, raw_payload)
             )
             
             conn.commit()
@@ -141,14 +143,14 @@ class FaceDatabase:
             print(f"Error al guardar log: {e}")
             return False
     
-    def get_recent_logs(self, limit: int = 50) -> List[Tuple[str, str, float]]:
+    def get_recent_logs(self, limit: int = 50) -> List[Tuple[str, str, float, str]]:
         """Obtiene los logs más recientes con nombres de personas"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT p.nombre, l.timestamp, l.confianza 
+                SELECT p.nombre, l.timestamp, l.confianza, l.raw_payload
                 FROM logs l 
                 LEFT JOIN personas p ON l.persona_id = p.id 
                 ORDER BY l.timestamp DESC 
@@ -193,10 +195,102 @@ class FaceDatabase:
             conn.close()
             
             if result:
-                embedding = np.array(json.loads(result[2]))
+                # Convertir BLOB de vuelta a numpy array
+                embedding = np.frombuffer(result[2], dtype=np.float32)
                 return (result[0], result[1], embedding)
             return None
             
         except Exception as e:
             print(f"Error al obtener persona: {e}")
-            return None 
+            return None
+    
+    def get_database_stats(self) -> dict:
+        """Obtiene estadísticas de la base de datos"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Contar personas
+            cursor.execute("SELECT COUNT(*) FROM personas")
+            people_count = cursor.fetchone()[0]
+            
+            # Contar logs
+            cursor.execute("SELECT COUNT(*) FROM logs")
+            logs_count = cursor.fetchone()[0]
+            
+            # Contar logs recientes (últimas 24 horas)
+            cursor.execute("""
+                SELECT COUNT(*) FROM logs 
+                WHERE timestamp > datetime('now', '-1 day')
+            """)
+            recent_logs_count = cursor.fetchone()[0]
+            
+            # Contar reconocimientos exitosos
+            cursor.execute("""
+                SELECT COUNT(*) FROM logs 
+                WHERE persona_id IS NOT NULL
+            """)
+            successful_recognitions = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                'total_people': people_count,
+                'total_logs': logs_count,
+                'recent_logs_24h': recent_logs_count,
+                'successful_recognitions': successful_recognitions,
+                'database_path': self.db_path,
+                'database_size': os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
+            }
+            
+        except Exception as e:
+            print(f"Error al obtener estadísticas de la base de datos: {e}")
+            return {
+                'total_people': 0,
+                'total_logs': 0,
+                'recent_logs_24h': 0,
+                'successful_recognitions': 0,
+                'database_path': self.db_path,
+                'database_size': 0,
+                'error': str(e)
+            }
+    
+    def clear_old_logs(self, days: int = 30) -> int:
+        """Limpia logs antiguos y retorna el número de logs eliminados"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Contar logs que se van a eliminar
+            cursor.execute("""
+                SELECT COUNT(*) FROM logs 
+                WHERE timestamp < datetime('now', '-{} days')
+            """.format(days))
+            
+            count_to_delete = cursor.fetchone()[0]
+            
+            # Eliminar logs antiguos
+            cursor.execute("""
+                DELETE FROM logs 
+                WHERE timestamp < datetime('now', '-{} days')
+            """.format(days))
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            conn.close()
+            
+            return deleted_count
+            
+        except Exception as e:
+            print(f"Error al limpiar logs antiguos: {e}")
+            return 0
+    
+    def backup_database(self, backup_path: str) -> bool:
+        """Crea una copia de seguridad de la base de datos"""
+        try:
+            import shutil
+            shutil.copy2(self.db_path, backup_path)
+            return True
+        except Exception as e:
+            print(f"Error al crear backup: {e}")
+            return False 

@@ -17,13 +17,21 @@ import signal
 import sys
 import os
 from typing import Optional
+import logging
 
-# Importar módulos del sistema
 from face_db import FaceDatabase
 from recognizer import FaceRecognizer
-from camera_handler import CameraHandler
+from camera_handler import IMX500CameraHandler
 from webapp import app
+from utils import log_system_event, get_all_metrics
 import uvicorn
+
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class FaceRecognitionSystem:
     def __init__(self):
@@ -40,63 +48,71 @@ class FaceRecognitionSystem:
         self.frame_height = 480
         self.web_host = "0.0.0.0"
         self.web_port = 8000
-        self.recognition_interval = 0.1  # 100ms entre reconocimientos
+        self.recognition_interval = 0.1
         
         # Manejo de señales
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+        
+        # Logging de eventos del sistema
+        log_system_event("INFO", "Sistema de reconocimiento facial inicializado")
     
     def _signal_handler(self, signum, frame):
         """Maneja señales de terminación"""
-        print(f"\nRecibida señal {signum}, cerrando sistema...")
+        logger.info(f"Recibida señal {signum}, cerrando sistema...")
+        log_system_event("INFO", f"Sistema terminado por señal {signum}")
         self.stop()
         sys.exit(0)
     
     def initialize(self) -> bool:
         """Inicializa todos los componentes del sistema"""
         try:
-            print("Inicializando Sistema de Reconocimiento Facial...")
+            logger.info("Inicializando Sistema de Reconocimiento Facial...")
+            log_system_event("INFO", "Iniciando inicialización del sistema")
             
-            # 1. Inicializar base de datos
-            print("  - Inicializando base de datos...")
+            # Inicializar base de datos
+            logger.info("  - Inicializando base de datos...")
             self.face_db = FaceDatabase()
-            print("    ✓ Base de datos inicializada")
+            logger.info("    ✓ Base de datos inicializada")
             
-            # 2. Inicializar reconocedor facial
-            print("  - Inicializando reconocedor facial...")
+            # Inicializar reconocedor facial
+            logger.info("  - Inicializando reconocedor facial...")
             self.face_recognizer = FaceRecognizer(self.face_db)
-            print("    ✓ Reconocedor facial inicializado")
+            logger.info("    ✓ Reconocedor facial inicializado")
             
-            # 3. Inicializar cámara
-            print("  - Inicializando cámara...")
-            self.camera_handler = CameraHandler(
+            # Inicializar cámara IMX500
+            logger.info("  - Inicializando cámara IMX500...")
+            self.camera_handler = IMX500CameraHandler(
                 camera_index=self.camera_index,
                 frame_width=self.frame_width,
                 frame_height=self.frame_height
             )
             
             if not self.camera_handler.start():
-                print("    ✗ Error al iniciar cámara")
+                logger.error("    ✗ Error al iniciar cámara")
+                log_system_event("ERROR", "Error al iniciar cámara IMX500")
                 return False
             
-            print("    ✓ Cámara iniciada")
+            logger.info("    ✓ Cámara IMX500 iniciada")
             
-            # 4. Configurar callback de reconocimiento
+            # Configurar callback de reconocimiento
             self.camera_handler.set_recognition_callback(self._on_face_detected)
             
-            # 5. Iniciar hilo de reconocimiento
+            # Iniciar hilo de reconocimiento
             self.recognition_thread = threading.Thread(
                 target=self._recognition_loop,
                 daemon=True
             )
             self.recognition_thread.start()
-            print("    ✓ Hilo de reconocimiento iniciado")
+            logger.info("    ✓ Hilo de reconocimiento iniciado")
             
-            print("✓ Sistema inicializado correctamente")
+            logger.info("✓ Sistema inicializado correctamente")
+            log_system_event("SUCCESS", "Sistema inicializado correctamente")
             return True
             
         except Exception as e:
-            print(f"✗ Error en inicialización: {e}")
+            logger.error(f"✗ Error en inicialización: {e}")
+            log_system_event("ERROR", f"Error en inicialización: {e}")
             return False
     
     def _on_face_detected(self, frame, face_data):
@@ -109,19 +125,21 @@ class FaceRecognitionSystem:
                 # Realizar reconocimiento
                 results = self.face_recognizer.batch_recognize(recognition_input)
                 
-                # Procesar resultados
                 for nombre, confianza, es_nuevo, bbox in results:
                     if nombre:
-                        print(f"Rostro reconocido: {nombre} (confianza: {confianza:.2f})")
+                        logger.info(f"Rostro reconocido: {nombre} (confianza: {confianza:.2f})")
+                        log_system_event("INFO", f"Reconocimiento exitoso: {nombre} ({confianza:.2f})")
                     else:
-                        print(f"Rostro desconocido detectado (confianza: {confianza:.2f})")
+                        logger.info(f"Rostro desconocido detectado (confianza: {confianza:.2f})")
+                        log_system_event("INFO", f"Rostro desconocido detectado ({confianza:.2f})")
                         
         except Exception as e:
-            print(f"Error en callback de reconocimiento: {e}")
+            logger.error(f"Error en callback de reconocimiento: {e}")
+            log_system_event("ERROR", f"Error en callback de reconocimiento: {e}")
     
     def _recognition_loop(self):
         """Hilo principal de reconocimiento facial"""
-        print("Hilo de reconocimiento iniciado")
+        logger.info("Hilo de reconocimiento iniciado")
         
         while self.is_running:
             try:
@@ -142,25 +160,25 @@ class FaceRecognitionSystem:
                             # Procesar resultados
                             for nombre, confianza, es_nuevo, bbox in results:
                                 if nombre and es_nuevo:
-                                    print(f"✓ {nombre} reconocido (confianza: {confianza:.2f})")
+                                    logger.info(f"✓ {nombre} reconocido (confianza: {confianza:.2f})")
                                 elif not nombre:
-                                    print(f"? Rostro desconocido detectado")
+                                    logger.debug(f"? Rostro desconocido detectado")
                 
                 # Control de frecuencia
                 time.sleep(self.recognition_interval)
                 
             except Exception as e:
-                print(f"Error en hilo de reconocimiento: {e}")
+                logger.error(f"Error en hilo de reconocimiento: {e}")
+                log_system_event("ERROR", f"Error en hilo de reconocimiento: {e}")
                 time.sleep(0.1)
         
-        print("Hilo de reconocimiento terminado")
+        logger.info("Hilo de reconocimiento terminado")
     
     def start_web_server(self):
         """Inicia el servidor web en un hilo separado"""
         try:
-            print(f"Iniciando servidor web en {self.web_host}:{self.web_port}...")
+            logger.info(f"Iniciando servidor web en {self.web_host}:{self.web_port}...")
             
-            # Configurar uvicorn
             config = uvicorn.Config(
                 app=app,
                 host=self.web_host,
@@ -169,21 +187,21 @@ class FaceRecognitionSystem:
                 access_log=True
             )
             
-            # Crear servidor
             self.web_server = uvicorn.Server(config)
             
-            # Ejecutar en hilo separado
             web_thread = threading.Thread(
                 target=self._run_web_server,
                 daemon=True
             )
             web_thread.start()
             
-            print("    ✓ Servidor web iniciado")
+            logger.info("    ✓ Servidor web iniciado")
+            log_system_event("SUCCESS", f"Servidor web iniciado en {self.web_host}:{self.web_port}")
             return True
             
         except Exception as e:
-            print(f"    ✗ Error al iniciar servidor web: {e}")
+            logger.error(f"    ✗ Error al iniciar servidor web: {e}")
+            log_system_event("ERROR", f"Error al iniciar servidor web: {e}")
             return False
     
     def _run_web_server(self):
@@ -191,7 +209,8 @@ class FaceRecognitionSystem:
         try:
             self.web_server.run()
         except Exception as e:
-            print(f"Error en servidor web: {e}")
+            logger.error(f"Error en servidor web: {e}")
+            log_system_event("ERROR", f"Error en servidor web: {e}")
     
     def start(self) -> bool:
         """Inicia el sistema completo"""
@@ -199,114 +218,148 @@ class FaceRecognitionSystem:
             if not self.initialize():
                 return False
             
-            # Iniciar servidor web
             if not self.start_web_server():
                 return False
             
             self.is_running = True
-            print("\n🎉 Sistema de Reconocimiento Facial iniciado exitosamente!")
-            print(f"📱 Interfaz web disponible en: http://{self.web_host}:{self.web_port}")
-            print("📷 Cámara funcionando en tiempo real")
-            print("🔍 Reconocimiento facial activo")
-            print("\nPresiona Ctrl+C para detener el sistema")
             
+            logger.info("\n🎉 Sistema de Reconocimiento Facial iniciado exitosamente!")
+            logger.info(f"📱 Interfaz web disponible en: http://{self.web_host}:{self.web_port}")
+            logger.info("📷 Cámara IMX500 funcionando en tiempo real")
+            logger.info("🔍 Reconocimiento facial activo")
+            logger.info("\nPresiona Ctrl+C para detener el sistema")
+            
+            log_system_event("SUCCESS", "Sistema iniciado completamente")
             return True
             
         except Exception as e:
-            print(f"Error al iniciar sistema: {e}")
+            logger.error(f"Error al iniciar sistema: {e}")
+            log_system_event("ERROR", f"Error al iniciar sistema: {e}")
             return False
     
     def stop(self):
         """Detiene el sistema completo"""
-        print("\nDeteniendo sistema...")
+        logger.info("\nDeteniendo sistema...")
+        log_system_event("INFO", "Deteniendo sistema")
         
         self.is_running = False
         
         # Detener cámara
         if self.camera_handler:
-            print("  - Deteniendo cámara...")
+            logger.info("  - Deteniendo cámara...")
             self.camera_handler.stop()
-            print("    ✓ Cámara detenida")
+            logger.info("    ✓ Cámara detenida")
         
         # Detener servidor web
         if self.web_server:
-            print("  - Deteniendo servidor web...")
+            logger.info("  - Deteniendo servidor web...")
             try:
                 self.web_server.should_exit = True
             except:
                 pass
-            print("    ✓ Servidor web detenido")
+            logger.info("    ✓ Servidor web detenido")
         
-        # Esperar hilos
+        # Esperar hilo de reconocimiento
         if self.recognition_thread and self.recognition_thread.is_alive():
-            print("  - Esperando hilo de reconocimiento...")
+            logger.info("  - Esperando hilo de reconocimiento...")
             self.recognition_thread.join(timeout=3)
-            print("    ✓ Hilo de reconocimiento terminado")
+            logger.info("    ✓ Hilo de reconocimiento terminado")
         
-        print("✓ Sistema detenido correctamente")
+        logger.info("✓ Sistema detenido correctamente")
+        log_system_event("INFO", "Sistema detenido correctamente")
     
     def get_status(self) -> dict:
         """Obtiene el estado del sistema"""
-        status = {
-            'is_running': self.is_running,
-            'components': {
-                'database': self.face_db is not None,
-                'recognizer': self.face_recognizer is not None,
-                'camera': self.camera_handler is not None and self.camera_handler.is_running,
-                'web_server': self.web_server is not None
+        try:
+            status = {
+                'is_running': self.is_running,
+                'components': {
+                    'database': self.face_db is not None,
+                    'recognizer': self.face_recognizer is not None,
+                    'camera': self.camera_handler is not None and self.camera_handler.is_running,
+                    'web_server': self.web_server is not None
+                }
             }
-        }
-        
-        # Información de la cámara
-        if self.camera_handler:
-            status['camera_info'] = self.camera_handler.get_camera_info()
-        
-        # Estadísticas de reconocimiento
-        if self.face_recognizer:
-            status['recognition_stats'] = self.face_recognizer.get_recognition_stats()
-        
-        # Estadísticas de la base de datos
-        if self.face_db:
-            people = self.face_db.list_people()
-            recent_logs = self.face_db.get_recent_logs(50)
-            status['database_stats'] = {
-                'total_people': len(people),
-                'total_logs': len(recent_logs),
-                'recent_activity': len([log for log in recent_logs if log[0] is not None])
+            
+            # Información de la cámara
+            if self.camera_handler:
+                status['camera_info'] = self.camera_handler.get_camera_status()
+            
+            # Estadísticas de reconocimiento
+            if self.face_recognizer:
+                status['recognition_stats'] = self.face_recognizer.get_recognition_stats()
+            
+            # Estadísticas de la base de datos
+            if self.face_db:
+                db_stats = self.face_db.get_database_stats()
+                status['database_stats'] = db_stats
+            
+            # Métricas del sistema
+            try:
+                system_metrics = get_all_metrics()
+                status['system_metrics'] = system_metrics
+            except Exception as e:
+                logger.warning(f"No se pudieron obtener métricas del sistema: {e}")
+                status['system_metrics'] = {'error': str(e)}
+            
+            return status
+            
+        except Exception as e:
+            logger.error(f"Error al obtener estado del sistema: {e}")
+            return {
+                'is_running': self.is_running,
+                'error': str(e)
             }
-        
-        return status
     
     def run_interactive(self):
         """Ejecuta el sistema en modo interactivo"""
         try:
             if not self.start():
-                print("Error al iniciar sistema")
+                logger.error("Error al iniciar sistema")
                 return
             
-            # Bucle principal
+            logger.info("Sistema ejecutándose en modo interactivo...")
+            
             while self.is_running:
                 try:
-                    # Mostrar estado cada 10 segundos
+                    # Esperar 10 segundos
                     time.sleep(10)
                     
                     if self.is_running:
+                        # Mostrar estado del sistema
                         status = self.get_status()
+                        
+                        # FPS de la cámara
                         fps = status.get('camera_info', {}).get('current_fps', 0)
+                        
+                        # Número de personas
                         people_count = status.get('database_stats', {}).get('total_people', 0)
                         
-                        print(f"📊 Estado: FPS={fps:.1f}, Personas={people_count}")
+                        # Estado de la cámara
+                        camera_status = status.get('camera_info', {}).get('status', 'UNKNOWN')
+                        
+                        logger.info(f"📊 Estado: FPS={fps:.1f}, Personas={people_count}, Cámara={camera_status}")
+                        
+                        # Loggear métricas del sistema
+                        if 'system_metrics' in status and 'system' in status['system_metrics']:
+                            system_info = status['system_metrics']['system']
+                            cpu = system_info.get('cpu_percent', 0)
+                            memory = system_info.get('memory_percent', 0)
+                            temp = system_info.get('temperature', 'N/A')
+                            
+                            logger.info(f"💻 Sistema: CPU={cpu:.1f}%, RAM={memory:.1f}%, Temp={temp}°C")
                         
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
-                    print(f"Error en bucle principal: {e}")
+                    logger.error(f"Error en bucle principal: {e}")
                     time.sleep(1)
-            
+                    
         except KeyboardInterrupt:
-            print("\nInterrupción del usuario")
+            logger.info("\nInterrupción del usuario")
         except Exception as e:
-            print(f"Error en modo interactivo: {e}")
+            logger.error(f"Error en modo interactivo: {e}")
+            log_system_event("ERROR", f"Error en modo interactivo: {e}")
         finally:
             self.stop()
 
@@ -314,16 +367,18 @@ def main():
     """Función principal"""
     print("=" * 60)
     print("SISTEMA DE RECONOCIMIENTO FACIAL EN TIEMPO REAL")
-    print("Raspberry Pi 5 + Raspberry Pi AI Camera")
+    print("Raspberry Pi 5 + Raspberry Pi AI Camera (IMX500)")
     print("=" * 60)
     
-    # Crear y ejecutar sistema
+    # Crear sistema
     system = FaceRecognitionSystem()
     
     try:
+        # Ejecutar sistema
         system.run_interactive()
     except Exception as e:
-        print(f"Error fatal: {e}")
+        logger.error(f"Error fatal: {e}")
+        log_system_event("ERROR", f"Error fatal del sistema: {e}")
         system.stop()
         sys.exit(1)
 
